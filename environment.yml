@@ -1,0 +1,13 @@
+name: tracev2
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - rasterio       
+  - rioxarray
+  - numpy
+  - geopandas     
+  - matplotlib     
+  - pandas
+  - netcdf4
+  - eodag         
