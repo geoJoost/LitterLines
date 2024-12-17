@@ -164,9 +164,9 @@ def download_single_s2img(s2_product, lat_centroid, lon_centroid, out_dir):
     l1c_path = os.path.join(out_dir, f"L1C_{file_name}")
 
     # Skip download if either file already exists
-    #if os.path.exists(l2a_path) or os.path.exists(l1c_path):
-    #    print(f"File '{file_name}' already exists. Skipping download.")
-    #    return  # Skip processing if either file exists
+    if os.path.exists(l2a_path) or os.path.exists(l1c_path):
+        print(f"File '{file_name}' already exists. Skipping download.")
+        return  # Skip processing if either file exists
 
     print('\n' + '#'*40)
     print(f"Processing file: '{file_name}'")
@@ -187,8 +187,14 @@ def download_single_s2img(s2_product, lat_centroid, lon_centroid, out_dir):
         {'geometry': [Polygon(coordinates)]},
         crs="EPSG:4326"
     )
-    bbox_shapefile_path = os.path.join(out_dir, 'bounding_box.shp')
-    bbox_gdf.to_file(bbox_shapefile_path)
+    bbox_gdf.to_file(os.path.join(out_dir, 'bounding_box.shp')) # Save as .shp as this is required for Planet Explorer
+
+    # Save the centroid as a GeoPackage
+    centroid_gdf = gpd.GeoDataFrame(
+        {'geometry': [Point(lon_centroid, lat_centroid)]},
+        crs="EPSG:4326"
+    )
+    centroid_gdf.to_file(os.path.join(out_dir, 'centroid.gpkg'), driver='GPKG')
 
     # Attempt to get fetch and process the L2A image
     bands = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B9', 'B11', 'B12']

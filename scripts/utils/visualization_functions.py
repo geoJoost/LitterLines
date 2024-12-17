@@ -840,8 +840,8 @@ def plot_spectral_angle_signatures(file_path, l2a_bands, top_n=5):
     df = pd.read_csv(file_path)
 
     # Filter relevant columns
-    spectral_angles = ['sam_HDPE', 'sam_PVC', 'sam_HDPE_BF']
-    rename_mapping = {'sam_HDPE': 'HDPE', 'sam_PVC': 'PVC', 'sam_HDPE_BF': 'HDPE-BF'}
+    spectral_angles = ['sam_HDPE', 'sam_PVC', 'sam_HDPE_BF', 'sam_water']
+    rename_mapping = {'sam_HDPE': 'HDPE', 'sam_PVC': 'PVC', 'sam_HDPE_BF': 'HDPE-BF', 'sam_water': 'Water'}
 
     # Melt the spectral angles into a single column for easier plotting
     df_melted = df.melt(id_vars=l2a_bands + ['date'], 
@@ -853,20 +853,28 @@ def plot_spectral_angle_signatures(file_path, l2a_bands, top_n=5):
     df_melted['target'] = df_melted['target'].map(rename_mapping)
 
     # Drop rows with NaN spectral angles
-    #df_melted = df_melted.dropna(subset=['spectral_angle'])
-
-    # Convert spectral angles to percentages
-    #df_melted['spectral_angle'] *= 100
-    #df_melted['spectral_angle'] = np.degrees(df_melted['spectral_angle']) # Implemented in spectral_analysis.py
+    df_melted = df_melted.dropna(subset=['spectral_angle'])
 
     # Top-N lowest spectral angles
     top_spectral = df_melted.nsmallest(top_n, 'spectral_angle')
+
+    # Define custom colors
+    colors = {
+        "HDPE": '#ff7d00',
+        "PVC": '#15616d',
+        "HDPE-BF": '#001524',
+        "Water": '#6495ED',
+        "Cozar": '#ccc5b9'
+    }
+    
+    # Custom color palette for seaborn
+    palette = {key: colors[key] for key in df_melted['target'].unique() if key in colors}
 
     # Plotting
     fig, axes = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [1, 2]})
 
     # Top plot: Spectral angle distribution
-    sns.histplot(data=df_melted, x='spectral_angle', hue='target', ax=axes[0], kde=True, palette='Set2')
+    sns.histplot(data=df_melted, x='spectral_angle', hue='target', ax=axes[0], kde=True, palette=palette)
     axes[0].set_title('Spectral Angle Distribution')
     axes[0].set_xlabel('Spectral Angle (°)') 
     axes[0].set_ylabel('Frequency')
@@ -875,7 +883,7 @@ def plot_spectral_angle_signatures(file_path, l2a_bands, top_n=5):
     # Bottom plot: Spectral signatures of top-N
     for _, row in top_spectral.iterrows():
         band_values = row[l2a_bands].values
-        axes[1].plot(x_axis, band_values, marker='o', label=f"{row['target']}: {row['spectral_angle']:.1f}°")
+        axes[1].plot(x_axis, band_values, marker='o', label=f"{row['target']}: {row['spectral_angle']:.1f}°", color=colors.get(row['target'], '#000000'))
 
     axes[1].set_title(f'Spectral Signatures of Top-{top_n} Observations by Lowest Spectral Angle')
     axes[1].set_xlabel('Wavelength (nm)')

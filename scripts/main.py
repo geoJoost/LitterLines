@@ -8,13 +8,13 @@ import time
 import pandas as pd
 
 # Custom modules
-from utils.visualization_functions import plot_histogram, plot_line_graph, plot_scatter, plot_pca, \
-    plot_planetscope_acquisitions, plot_spectral_angle_signatures, plot_individual_spectra, plot_random_spectra
+from utils.visualization_functions import *
 from core.extract_cozar_reflectance import process_cozar_data
 from core.spectral_analysis import get_plp_scenes, spectral_similarity, print_spectral_angles
 from utils.planet_functions import planet_query
 from utils.gee_downloader import get_date_from_product
 from utils.create_water_samples import generate_water_points
+from utils.organise_annotation_folders import process_spectral_angles
 
 # Define start time to measure how long the script takes to complete
 start = time.time()
@@ -154,6 +154,19 @@ def process_cozar_predictions(netcdf_path, plot_figures=True):
     
     # Output the potential PlanetScope scenes
     print_spectral_angles(output_file, top_n=10, spatial_overlap='yes')
+
+    # Prepare annotation folders by:
+    ## Downloading Sentinel-2 data (~25km)
+    ## Computing the FDI and NDI_B2B8
+    ## Preparing metadata
+    process_spectral_angles(csv_file=output_file, top_n=40, include_overlap=True)
+
+    # 
+    
+
+   
+
+
 
 
 process_cozar_predictions(netcdf_path="data/raw/WASP_LW_SENT2_MED_L1C_B_201506_202109_10m_6y_NRT_v1.0.nc", plot_figures=True)

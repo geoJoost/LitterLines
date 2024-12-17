@@ -1,12 +1,14 @@
+import numpy as np
 
 def scene_to_ndi(raster, band_list, b1_idx='B4', b2_idx='B8'):
     """ Calculate Normalized Difference Index """
     # Read in the desired bands based on all multispectral bands given
-    b1 = raster[band_list.index(b1_idx)] #=> for instance use "B8" to sample from (n_channels, n_pixels)
-    b2 = raster[band_list.index(b2_idx)]
+    b1 = raster[band_list.index(b1_idx)].astype(float) #=> for instance use "B8" to sample from (n_channels, n_pixels)
+    b2 = raster[band_list.index(b2_idx)].astype(float)
 
-    # Calculate NDI
-    ndi = (b1 - b2) / (b1 + b2)
+    # Calculate NDI while ignoring nodata values
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ndi = (b1 - b2) / (b1 + b2)
 
     return ndi
 

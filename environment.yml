@@ -14,3 +14,4 @@ dependencies:
   - earthengine-api
   - geemap
   - spectral
+  - skimage
