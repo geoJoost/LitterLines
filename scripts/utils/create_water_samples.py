@@ -98,6 +98,3 @@ def generate_water_points(output_path, seed=42):
     geo_df.to_file(output_path)
 
     print(f"Shapefile saved to {output_path}")
-
-# Example usage
-

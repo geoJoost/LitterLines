@@ -115,39 +115,41 @@ def process_lines_extract_spectral(fid_list, tif_filepath):
         Returns:
             list: A list of dictionaries containing distances and reflectance values for each line.
         """
+        from rasterio.features import rasterize
         results = []
-        
+        # TODO: Remove the with statement and replace with direct raster input
         with rasterio.open(raster_path) as src:
             cell_size = int(src.res[0])
-
+            raster_transform = src.transform
+            raster_crs = src.crs
+            raster_shape = (src.height, src.width)
+            
             # For each line in the GeoDataFrame
             for _, row in lines_gdf.iterrows():
                 line = row['perpline']  # Get the LineString geometry
                 
-                # Ensure line is within raster bounds
-                #if not line.intersects(src.bounds):
-                #    continue
+                # Rasterize the current line
+                line_raster = rasterize(
+                        [(line, 1)],
+                        out_shape=raster_shape,
+                        transform=raster_transform,
+                        fill=0,
+                        all_touched=True,
+                        dtype=np.uint8
+                    )
                 
-                # Rasterize the line into pixel coordinates
-                # TODO: Fix this piece of code
-                coords = np.array(list(line.coords))
-                pixel_coords = [~src.transform * (x, y) for x, y in coords]
-                pixel_coords = np.array(pixel_coords).round().astype(int)
+                # Get pixel indices for lines
+                rows, cols = np.where(line_raster == 1)
                 
-                # Filter valid pixel coordinates within raster bounds
-                rows, cols = pixel_coords[:, 1], pixel_coords[:, 0]
-                valid_mask = (rows >= 0) & (rows < src.height) & (cols >= 0) & (cols < src.width)
-                rows, cols = rows[valid_mask], cols[valid_mask]
-                
-                # Sample raster values for valid pixels
+                # Extract values for each VNIR band
                 values = []
                 for band in bands:
                     band_data = src.read(band)
                     band_values = band_data[rows, cols]
                     values.append(band_values)
                 
-                # Calculate distances along the line based on the raster cell size (m)
-                distances = np.arange(0, line.length, src.res[0])
+                num_points = int(line.length // src.res[0]) + 1  # Number of points based on raster resolution
+                distances = np.linspace(0, line.length, num_points)  # Distances along the line
                 
                 # Store results for this line
                 results.append({
@@ -158,42 +160,82 @@ def process_lines_extract_spectral(fid_list, tif_filepath):
         return results
 
 
-    def plot_histograms(results, bands_labels=["Blue", "Green", "Red", "NIR"]):
+    def plot_histograms(results, raster_path, bands_labels=["Blue", "Green", "Red", "NIR"]):
         """
-        Plot histograms for reflectance values along each line.
+        Plot histograms for reflectance values along each line and overlay the perpendicular lines on the raster image.
 
         Parameters:
             results (list): Results returned by extract_raster_along_line_full.
+            raster_file (str): Path to the raster file for the RGB image.
             bands_labels (list): Labels for each raster band.
         """
+        # Read the raster image for plotting
+        with rasterio.open(raster_path) as src:
+            # Assuming that bands 1, 2, and 3 are RGB
+            blue = src.read(1)
+            green = src.read(2)
+            red = src.read(3)
+            rgb = np.dstack([red, green, blue])
+
+        # Create a figure with two subplots: one for the raster and one for histograms
+        fig, axes = plt.subplots(len(results), 2, figsize=(16, 6 * len(results)))
+        
+        # Ensure axes is iterable even for single line case
+        if len(results) == 1:
+            axes = np.expand_dims(axes, axis=0)
+        
         for i, result in enumerate(results):
             distances = result['distances']
             values = result['values']  # Shape: (num_bands, num_points)
+            
+            distances = np.arange(0, len(values[0])) # TODO: Replace / remove
 
-            plt.figure(figsize=(12, 6))
+            # Plot the raster image with the perpendicular line(s)
+            ax_rgb = axes[i, 0]
+            ax_rgb.imshow(rgb)
+            ax_rgb.set_title(f"RGB Image with Perpendicular Line {i+1}")
+            ax_rgb.set_xlabel("X (meters)")
+            ax_rgb.set_ylabel("Y (meters)")
+
+            # Assuming you have the perpendicular line as a GeoSeries in your result
+            # If result['perpline'] is a list of LineStrings, you may need to loop over them
+            #for line in result['perpline']:  # Assuming the line is stored in result['perpline']
+            #    ax_rgb.plot(
+            #        [point[0] for point in line.coords],  # X coordinates of the line
+            #        [point[1] for point in line.coords],  # Y coordinates of the line
+            #        color='red', linewidth=2, label=f"Line {i+1}"
+            #    )
+            #ax_rgb.legend()
+
+            # Plot the spectral reflectance histograms
+            ax_hist = axes[i, 1]
             for band_idx, band_values in enumerate(values):
-                plt.plot(distances, band_values, label=bands_labels[band_idx])
+                ax_hist.plot(distances, band_values, label=bands_labels[band_idx])
 
-            plt.title(f"Spectral Reflectance Along Perpendicular Line {i+1}")
-            plt.xlabel("Distance Along Line (meters)")
-            plt.ylabel("Reflectance")
-            plt.legend()
-            plt.grid()
-            #plt.show()
-            plt.savefig("doc/debug/perp_line_hist.png")
+            ax_hist.set_title(f"Spectral Reflectance Along Perpendicular Line {i+1}")
+            ax_hist.set_xlabel("Distance Along Line (meters)")
+            ax_hist.set_ylabel("Reflectance")
+            ax_hist.legend()
+            ax_hist.grid(True)
+
+        # Adjust layout
+        plt.tight_layout()
+        # Save the figure
+        plt.savefig("doc/debug/perpline_hist.png")
+        plt.show()
 
 
     # Create a column of perpendicular lines
     selected_lines['perpline'] = selected_lines.apply(lambda x: giveline(linestring=x.geometry, distance=1000, interval=20), axis=1)
 
     # Filter out NaN rows and create new GeoDataFrame
-    perpendicular_lines = gpd.GeoDataFrame(selected_lines.explode(column='perpline', ignore_index=True), geometry='perpline')
+    perpendicular_lines = gpd.GeoDataFrame(selected_lines.explode(column='perpline', ignore_index=True), geometry='perpline', crs=raster_crs)
 
     # Extract TOA reflectance along the perpendicular lines
     results = extract_along_line(tif_filepath, perpendicular_lines)
 
     # Plot histograms
-    plot_histograms(results)
+    plot_histograms(results, tif_filepath)
 
     print('...')
 
