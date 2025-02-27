@@ -1,20 +1,20 @@
 import os
 import glob
-import torch
-import geopandas as gpd
-import rasterio
+import random
 import numpy as np
-from torch.utils.data import Dataset
-from torchvision import transforms
-from rasterio.mask import mask
-from rasterio.features import rasterize
-from shapely.geometry import mapping
+import torch
+import rasterio
+import geopandas as gpd
 import matplotlib.pyplot as plt
-
+from collections import defaultdict
+from torch.utils.data import Dataset, DataLoader, Subset
+from rasterio.features import rasterize
 import rasterio.windows
+from skimage.restoration import denoise_bilateral
+
 
 # Custom imports
-from dataloader_utils import flag_noisy_label, flag_nir_displacement, parse_reflectance_coefficients, split_linestring
+from core.dataloader_utils import flag_noisy_label, flag_nir_displacement, parse_reflectance_coefficients, split_linestring
 
 class LitterLinesDataset(Dataset):
     def __init__(self, root_dir, transform=None, patch_size=256):
@@ -25,78 +25,89 @@ class LitterLinesDataset(Dataset):
             patch_size (int): Size of patches to be used for segmentation.
         """
         self.root_dir = root_dir
-        self.geojson_path = os.path.join(root_dir, "mlw_annotations_20250121.gpkg")
         self.transform = transform
         self.patch_size = patch_size
-        
+
         # Read the GeoPackage with litter lines into a GeoDataFrame
+        self.geojson_path = os.path.join(root_dir, "mlw_annotations.gpkg")
         self.litter_data = gpd.read_file(self.geojson_path).to_crs(epsg=4326)
 
-        # Get all the available scene folders in the dataset
-        self.scene_folders = glob.glob(os.path.join(self.root_dir, '*/*/'))[:1] # TODO: Remove hard-coding. Used for debugging
+        # Store a list of all image-metadata pairs
+        self.samples = []
+        self._load_dataset()
+    
+    def _load_dataset(self):
+        """Precomputes file paths and their corresponding region IDs."""
+        scene_folders = glob.glob(os.path.join(self.root_dir, '*/*/'))#[:4] #TODO: Remove. Kept for debugging
+        #scene_folders = ['data/LitterLines/20171009_Kikaki/103a/', 'data/LitterLines/20171009_Kikaki/103c/', 'data/LitterLines/20171009_Kikaki/0f25/']
+        
+        for scene_folder in scene_folders:
+            # Get image paths and metadata XMLs
+            image_paths = glob.glob(os.path.join(scene_folder, "*AnalyticMS*.tif"))
+            xml_paths = glob.glob(os.path.join(scene_folder, "*metadata*.xml"))
+
+            if not image_paths or not xml_paths:
+                continue  # Skip if no valid images or metadata
+
+            # Extract region ID from path
+            region_id = scene_folder.split("/")[2]  # Example: '20180824_Syria'
+            
+            for image_path, xml_path in zip(image_paths, xml_paths):
+                self.samples.append((image_path, xml_path, region_id))
 
     def __len__(self):
-        return len(self.scene_folders)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        # Select a scene
-        scene_folder = self.scene_folders[idx]
-        #scene_folder = 'data/PS-LitterLines/20181107_Italy/1003' #/20201202_075858_57_2264_3B_AnalyticMS_clip.tif'
+        """ Returns all patches and masks for a given scene, with caching"""
+        image_path, xml_path, region_id = self.samples[idx]
+        scene_name = os.path.basename(image_path).split("_3B")[0] # Extract scene-name
         
-        # Load the corresponding PlanetScope scenes
-        image_paths = glob.glob(os.path.join(scene_folder, "*AnalyticMS*.tif"))
-        if len(image_paths) == 0:
-            raise FileNotFoundError(f"No matching image files found in {scene_folder}")
+        # Define cache filename
+        cache_dir = os.path.join("data", "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file_patches = os.path.join(cache_dir, f"{region_id}_{scene_name}_patches.pt")
+        cache_file_masks = os.path.join(cache_dir, f"{region_id}_{scene_name}_masks.pt")
         
-        # Parse reflectance coefficients from the associated XML file
-        xml_paths = glob.glob(os.path.join(scene_folder, "*metadata*.xml"))
-        if len(xml_paths) == 0:
-            raise FileNotFoundError(f"No XML metadata file found in {scene_folder}")
-
-        # Initialize lists
-        all_patches, all_masks = [], []
-
-        # Iterate over each individual PlanetScope scene
-        for image_path, xml_path in zip(image_paths, xml_paths):
-            # Get reflectance coefficients for converting TOAR into TOA
+        if os.path.exists(cache_file_patches):
+            print(f"[INFO] LitterLines is pre-processed. Retrieving dataset from cache.")
+            patches = torch.load(cache_file_patches)
+            masks = torch.load(cache_file_masks)
+        else:
+            # Get reflectance coefficients for TOAR to TOA
             reflectance_coefficients = parse_reflectance_coefficients(xml_path)
-
-            # Get raster attributes for creating image patches
-            with rasterio.open(image_path) as src:
-                raster_transform = src.transform 
-                crs = src.crs
             
-            # Extract PlanetScope ID from the image path
-            #scene_name = '20210430_082512_56_242d' # TODO: Remove this line. Used for 4-channel displacement
-            scene_name = os.path.basename(image_path).split("_3B")[0] # Get PS filenames like '20201202_075858_57_2264'
+            # Find associated MLW-annotations
             scene_annotations = self.litter_data[self.litter_data['ps_product'] == scene_name]
-
             if scene_annotations.empty:
-                print(f"No annotations found for '{image_path}'")
-                continue
-            print(f"Working on images from '{image_path}'")	
-        
+                print(f"[INFO] Skipping {region_id} with ID {scene_name}. No annotations found")
+                return torch.empty(0), torch.empty(0), None # Return empty tensors and None for region_id for filtering the data
+            print(f"[INFO] Processing {region_id} with ID: {scene_name}")
+                
             # Generate patches and masks
-            patches, masks = self._create_patches_and_masks(image_path, raster_transform, crs, scene_annotations, reflectance_coefficients)
-
-            print(f"Number of patches: {len(patches)} for PlanetScope scene: {scene_name}\n")
+            patches, masks = self._create_patches_and_masks(image_path, scene_annotations, reflectance_coefficients)
             
-            # Apply transforms if any
-            if self.transform:
-                patches = [self.transform(patch) for patch in patches]
-                masks = [self.transform(mask) for mask in masks]
+            # TODO: Remove at some point. Kept for debugging
+            #total_true_pixels = sum(arr.sum() for arr in masks)
+            #total_pixels = sum(arr.size for arr in masks)
+            #print(f"[INFO] {region_id} with ID {scene_name} has {total_true_pixels} pixels of MLWs, out of {total_pixels}")
 
-            # Append patches and masks for the current scene to the lists
-            all_patches.extend(patches)
-            all_masks.extend(masks)
+            # Convert to tensor
+            patches = torch.tensor(np.array(patches), dtype=torch.float32) # (N, C, 256, 256)
+            masks = torch.tensor(np.array(masks), dtype=torch.int8) # (N, 1, 256, 256)
+            
+            torch.save(patches, cache_file_patches)
+            torch.save(masks, cache_file_masks)
+
+        # Apply transform if available
+        if self.transform:
+            print(f"[INFO] Applying transform to images.")
+            patches = torch.stack([self.transform(patch) for patch in patches])
+            masks = torch.stack([self.transform(mask) for mask in masks])
         
-        # Append the regionID to use in train-validation-test split later, to prevent spatial autocorrelation
-        region_id = image_path.split("/")[2]
-        #region_ids = [region_id] * len(all_patches)
+        return patches, masks, region_id
 
-        return region_id, all_patches, all_masks
-    
-    def _create_patches_and_masks(self, image_path, transform, crs, annotations, reflectance_coefficients):
+    def _create_patches_and_masks(self, image_path, annotations, reflectance_coefficients):
         """
         Create 256x256px patches around annotations and corresponding masks.
         """
@@ -104,25 +115,25 @@ class LitterLinesDataset(Dataset):
         patches = []
         masks = []
 
-        # Window size in geographic coordinates
-        window_size = patch_size * transform[0]  # Transform[0] gets pixel size in meters
-        annotations = annotations.to_crs(crs) # EPSG:4326 into local CRS
-
-        # To prevent loss of annotations, make sure the linestrings do not exceed patch size
-        # If this occurs, break up the linestring into equal segments
-
-        # Splint individual linestrings into segments < window_size to make sure all annotations are captured within the labels
-        annotations['temp_geometry'] = annotations['geometry'].apply(
-            lambda geom: split_linestring(geom, max_length=window_size)
-        )
-        # Explode the new geometries and replace the original data
-        annotations = annotations.explode('temp_geometry', ignore_index=True)
-        annotations['geometry'] = annotations['temp_geometry']
-
-        assert annotations['geometry'].length.max() <= window_size, "Found segments exceeding window size"
-
-        # Iterate through each linestring in the annotations
+        # Open the image file to get metadata
         with rasterio.open(image_path) as src:
+            transform = src.transform
+            crs = src.crs
+
+            # Window size in geographic coordinates
+            window_size = patch_size * transform[0]  # Transform[0] gets pixel size in meters
+            annotations = annotations.to_crs(crs) # EPSG:4326 into local CRS
+
+            # To prevent loss of annotations, split linestrings into smaller segments when necessary
+            annotations['temp_geometry'] = annotations['geometry'].apply(
+                lambda geom: split_linestring(geom, max_length=window_size)
+            )
+            annotations = annotations.explode('temp_geometry', ignore_index=True)
+            annotations['geometry'] = annotations['temp_geometry']
+
+            assert annotations['geometry'].length.max() <= window_size, "Found segments exceeding window size"
+
+            # Iterate through each linestring in the annotations
             for _, row in annotations.iterrows():
                 geom = row['geometry']
                 #print(f"Linestring length: {geom.length:.2f}")
@@ -204,7 +215,7 @@ class LitterLinesDataset(Dataset):
                     plt.tight_layout()
                     plt.savefig(f"doc/debug/rgb_patch.png", bbox_inches='tight')
                     plt.close()
-                    print('Plotted figure')
+                    #print('Plotted figure')
                 #quick_viz(patch)
 
                 # Construct Shapely window for retrieving all annotations within the newly created patch
@@ -238,10 +249,10 @@ class LitterLinesDataset(Dataset):
                     )
 
                     # Generate the corresponding mask
-                    mask = self._generate_mask(patch, line_raster)
+                    mask = self._generate_mask(patch, line_raster).astype(np.int8)
                 
                 # Re-order from CHW to HWC for self.transform()
-                patch = patch.transpose(1, 2, 0)
+                #patch = patch.transpose(1, 2, 0)
 
                 # Flag 1: Check whether positive labels exceed >20% of all pixels in the label
                 # If this is the case, it is likely that the Otsu threshold has failed for this label 
@@ -264,55 +275,44 @@ class LitterLinesDataset(Dataset):
         return patches, masks
 
     def _generate_mask(self, patch, mask, buffersize_water=3, water_seed_probability=0.90, object_seed_probability=0.2, rw_beta=10):
-        # TODO: Choose either Otsu segments or the random walker. Make this clear in the code
-        # TODO: Handle image borders better. Right now the Otsu thresholding is shifted by it
+
         """
         Refines a coarse label mask given a patch using Otsu thresholding on VNIR data and Random Walker.
         """
-        from skimage.filters import gaussian, threshold_otsu
+        from skimage.filters import threshold_otsu
         from skimage.morphology import disk, dilation
         from skimage.segmentation import random_walker
         import numpy as np
+                
+        # Slight improvements in thresholded results, but slows down processing significantly
+        # for band_idx in range(patch.shape[0]):
+        #    valid_mask = patch[band_idx] > 0  # Identify valid (non-zero) pixels
+        #    filtered_band = denoise_bilateral(patch[band_idx], sigma_color=None, sigma_spatial=5)
+        #    patch[band_idx][valid_mask] = filtered_band[valid_mask]  # Apply only to valid pixels
 
-        out_shape = patch.shape[1:]
+        # Extract VNIR bands
+        blue, green, red, nir = patch
 
+        # Best performance was found utilizing using the Rotation-Absorption Index
+        # We also invert the NDI so debris objects are bright in the resulting image
+        with np.errstate(divide='ignore', invalid='ignore'): # Ignore NoData (=0.0) values outside the scene      
+            single_channel = (blue - nir) / (blue + nir) *-1
+           
+        # Remove NoData values (np.nan) for values outside the scene
+        valid_pixels = single_channel[~np.isnan(single_channel)]  # Extract only valid pixels
+        
+        # Otsu threshold
+        thresh = threshold_otsu(valid_pixels)  # Otsu threshold
+        q95 = np.percentile(valid_pixels, 95) # IQR95 threshold
+        otsu_segments = single_channel > q95
+        
         # Create the water mask
         mask_water = dilation(mask, footprint=disk(buffersize_water)) == 0
 
         # Generate water seeds
+        out_shape = patch.shape[1:] # (256, 256)
         random_seeds = np.random.rand(*out_shape) > water_seed_probability
         seeds_water = random_seeds * mask_water
-       
-        # Extract VNIR bands
-        blue, green, red, nir = patch
-        
-        # Create a NaN mask for patches on the scene edges
-        nan_mask = np.isnan(red) | np.isnan(green) | np.isnan(red) | np.isnan(nir)
-        
-        # Switch between NDI and band multiplication
-        use_ndi = False
-        if use_ndi:
-            # Best performance was found utilizing red, instead of green (i.e., NDWI)
-            # We also invert the NDI so debris objects are bright in the resulting image
-            single_channel = -(red - nir) / (red + nir + 1e-10) # Add small constant to prevent division by zero
-        else: # Band multiplication
-            single_channel = blue * green * red * nir
-
-        # Apply Gaussian blur
-        blur = True
-        if blur:
-            blurred_channel = gaussian(single_channel, sigma=2)
-            single_channel = np.where(nan_mask, np.nan, blurred_channel) # Restore NaN's so they dont influence the Otsu threshold
-
-        # Normalize single_channel into RGB range [0, 255]
-        vmin, vmax = np.nanpercentile(single_channel, [0, 100])
-        
-        single_channel = 255 * (single_channel - vmin) / (vmax - vmin)
-        single_channel[np.isnan(single_channel)] = np.nan  # Restore NaN's
-
-        # Otsu thresholding
-        thresh = threshold_otsu(single_channel[~nan_mask]) # Otsu threshold with NaN exclusion
-        otsu_segments = single_channel > thresh
         
         # Mask lines
         mask_lines = (~mask_water)
@@ -323,24 +323,18 @@ class LitterLinesDataset(Dataset):
         else:
             seeds_lines = mask_lines * (np.random.rand(*out_shape) > object_seed_probability)
 
-        # Random walker algorithm to refine the Otsu segments
-        refinement = True
-        if refinement:
-            # Apply random walker segmentation if seeds are present
-            if seeds_lines.sum() > 0:
-                markers = seeds_lines * 1 + seeds_water * 2
-                labels = random_walker(otsu_segments, markers, beta=rw_beta, mode='bf', return_full_prob=False) == 1
-                #labels = random_walker(otsu_segments, markers, beta=rw_beta, mode='cg_j', return_full_prob=False) == 1
-                #print("Refined the labels")
-            else:
-                print("Could not refine sample, returning original mask")
-                labels = mask
-                #markers = None
+        # Apply random walker segmentation if seeds are present
+        if seeds_lines.sum() > 0:
+            markers = seeds_lines * 1 + seeds_water * 2
+            labels = random_walker(patch, markers, beta=rw_beta, mode='bf', return_full_prob=False, channel_axis=0) == 1
+            #print("Refined the labels")
         else:
-            labels = otsu_segments
+            print("Could not refine sample, returning original mask")
+            labels = mask
+            #markers = None
 
         # Visualization
-        def quick_viz(single_channel, otsu_thresh, otsu_segments, final_mask, seeds_lines, seeds_water, mask):
+        def quick_viz(single_channel, valid_pixels_rescaled, otsu_thresh, q95, otsu_segments, final_mask, seeds_lines, seeds_water, mask):
             """
             Visualizes NDWI single channel, histogram with Otsu threshold, 
             Otsu segments, final mask, seed points, and overlay the original mask.
@@ -348,31 +342,31 @@ class LitterLinesDataset(Dataset):
             """
             fig, axes = plt.subplots(2, 2, figsize=(12, 12))
 
-            # Plot NDWI (single channel)
+            # Plot single channel visualization
             axes[0, 0].imshow(single_channel, cmap="gray")
-            axes[0, 0].set_title("Inverse NDWI")
+            axes[0, 0].set_title("Inverse Rotation-Absorption Index")
             axes[0, 0].axis("off")
 
             # Plot histogram with Otsu threshold
-            axes[0, 1].hist(single_channel[~np.isnan(single_channel)].ravel(), bins=256, color='gray', alpha=0.7)
+            axes[0, 1].hist(valid_pixels_rescaled, bins=256, color='gray', alpha=0.7)
             axes[0, 1].axvline(otsu_thresh, color='red', linestyle='--', label=f'Otsu Threshold: {otsu_thresh:.2f}')
-            #axes[0, 1].axvline(otsu_thresh[0], color='red', linestyle='--', label=f'Otsu Threshold: {otsu_thresh[0]:.2f}')
-            #axes[0, 1].axvline(otsu_thresh[1], color='blue', linestyle='--', label=f'Otsu Threshold: {otsu_thresh[1]:.2f}')
+            axes[0, 1].axvline(q95, color='blue', linestyle='--', label=f'IQR95 Threshold: {q95:.2f}')
 
-            axes[0, 1].set_title("Histogram with Otsu threshold")
-            axes[0, 1].set_xlabel("Inverse NDWI")
+
+            axes[0, 1].set_title("Histogram with thresholds")
+            axes[0, 1].set_xlabel("Inverse RAI")
             axes[0, 1].set_ylabel("Frequency")
             axes[0, 1].legend()
 
             # Plot Otsu segments
             axes[1, 0].imshow(otsu_segments, cmap="gray")
-            axes[1, 0].set_title("Otsu segments")
+            axes[1, 0].set_title("Segments")
             axes[1, 0].axis("off")
 
             # Overlay the seed points (seeds_lines and seeds_water) on Otsu segments
             # Flip the y-coordinates for correct alignment with imshow
-            #axes[1, 0].scatter(*np.flip(np.where(seeds_lines), axis=0), color='red', label='Object Seeds', s=5, marker='o', alpha=0.7)
-            #axes[1, 0].scatter(*np.flip(np.where(seeds_water), axis=0), color='blue', label='Water Seeds', s=5, marker='x', alpha=0.7)
+            axes[1, 0].scatter(*np.flip(np.where(seeds_lines), axis=0), color='red', label='Object Seeds', s=5, marker='o', alpha=0.7)
+            axes[1, 0].scatter(*np.flip(np.where(seeds_water), axis=0), color='blue', label='Water Seeds', s=5, marker='x', alpha=0.7)
 
             # Overlay the original mask (only positive values = 1) on Otsu segments in orange
             positive_mask_coords = np.where(mask == 1)
@@ -382,101 +376,131 @@ class LitterLinesDataset(Dataset):
             # Plot final mask
             axes[1, 1].imshow(final_mask, cmap="gray")
             axes[1, 1].scatter(*np.flip(positive_mask_coords, axis=0), color='orange', label='Line annotations', s=5, marker='o', alpha=0.7)
-            axes[1, 1].set_title("Final mask")
+            axes[1, 1].set_title("Final label")
             axes[1, 1].axis("off")
 
             # Adjust layout and save
             plt.tight_layout()
             plt.savefig(f"doc/debug/otsu_mask.png")
             plt.close()
-        quick_viz(single_channel, thresh, otsu_segments, labels, seeds_lines, seeds_water, mask)
+        #quick_viz(single_channel, valid_pixels, thresh, q95, otsu_segments, labels, seeds_lines, seeds_water, mask)
 
         return labels
 
-import random
-from collections import defaultdict
-
-def split_dataset_by_region(dataset, train_ratio=0.7, val_ratio=0.2, test_ratio=0.1, seed=42):
+class DatasetManager:
     """
-    Splits the dataset by unique region IDs to avoid spatial autocorrelation.
-
-    Args:
-        dataset (LitterLinesDataset): The dataset to split.
-        train_ratio (float): Fraction of regions for training.
-        val_ratio (float): Fraction for validation.
-        test_ratio (float): Fraction for testing.
-        seed (int): Random seed for reproducibility.
-
-    Returns:
-        dict: {'train': train_dataset, 'val': val_dataset, 'test': test_dataset}
+    Manages dataset splitting, loading, and preprocessing for the LitterLines dataset.
     """
-    random.seed(seed)
 
-    # Group scene indices by region ID
-    region_to_indices = defaultdict(list)
-    for idx in range(len(dataset)):
-        region_id, _, _ = dataset[idx]
-        region_to_indices[region_id].append(idx)
+    def __init__(self, dataset, train_ratio=0.7, val_ratio=0.2, seed=42, batch_size=8):
+        """
+        Initializes the DatasetManager with dataset and split configurations.
 
-    # Shuffle regions randomly
-    all_regions = list(region_to_indices.keys())
-    random.shuffle(all_regions)
+        Args:
+            dataset (LitterLinesDataset): The dataset to split.
+            train_ratio (float): Fraction of regions for training.
+            val_ratio (float): Fraction for validation.
+            seed (int): Random seed for reproducibility.
+            batch_size (int): Batch size for DataLoaders.
+        """
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.splits = self.split_dataset_by_region(dataset, train_ratio, val_ratio, seed)
 
-    # Split regions into train, val, test
-    num_regions = len(all_regions)
-    train_count = int(num_regions * train_ratio)
-    val_count = int(num_regions * val_ratio)
+    def split_dataset_by_region(self, dataset, train_ratio, val_ratio, seed):
+        """
+        Splits the dataset by unique region IDs to avoid spatial autocorrelation.
 
-    train_regions = set(all_regions[:train_count])
-    val_regions = set(all_regions[train_count:train_count + val_count])
-    test_regions = set(all_regions[train_count + val_count:])
+        Args:
+            dataset (LitterLinesDataset): The dataset to split.
+            train_ratio (float): Fraction of regions for training.
+            val_ratio (float): Fraction for validation.
+            seed (int): Random seed for reproducibility.
 
-    # Create subsets
-    train_indices = [idx for region in train_regions for idx in region_to_indices[region]]
-    val_indices = [idx for region in val_regions for idx in region_to_indices[region]]
-    test_indices = [idx for region in test_regions for idx in region_to_indices[region]]
+        Returns:
+            dict: {'train': train_dataset, 'val': val_dataset, 'test': test_dataset}
+        """
+        random.seed(seed)
 
-    return {
-        "train": torch.utils.data.Subset(dataset, train_indices),
-        "val": torch.utils.data.Subset(dataset, val_indices),
-        "test": torch.utils.data.Subset(dataset, test_indices),
-    }
+        # Group scene indices by region ID
+        region_to_indices = defaultdict(list)
+        for idx in range(len(dataset)):
+            _, _, region_id = dataset[idx]
+            if region_id is None:  # Skip empty samples
+                continue
+            region_to_indices[region_id].append(idx)
+            
+        # Debug: Print total number of regions detected
+        print(f"Total unique regions detected: {len(region_to_indices)}")
+            
+        # Ensure Kikaki dataset is used exclusively for testing
+        test_indices = region_to_indices.get('20171009_Kikaki', [])
+        if '20171009_Kikaki' in region_to_indices:
+            del region_to_indices['20171009_Kikaki']
 
+        # Shuffle regions randomly
+        all_regions = list(region_to_indices.keys())
+        random.shuffle(all_regions)
 
-def custom_collate_fn(batch):
-    from torch.nn.utils.rnn import pad_sequence
-    # Separate patches and masks
-    all_region_ids, all_patches, all_masks = [], [], []
+        # Split regions into train, val, test
+        num_regions = len(all_regions)
+        train_count = round(num_regions * train_ratio)
+        val_count = num_regions - train_count # Ensure all regions are used
 
-    for ids, patches, masks in batch:
-        if len(patches) == 0 or len(masks) == 0:
-            continue  # Skip empty returns
-        all_patches.extend(patches)
-        all_masks.extend(masks)
-        all_region_ids.extend(ids)
+        train_regions = set(all_regions[:train_count])
+        val_regions = set(all_regions[train_count:])
+        #test_regions = set(all_regions[train_count + val_count:])
 
-    # Pad and stack patches and masks
-    padded_region_ids = pad_sequence(all_region_ids, batch_first=True, padding_value='ID')
-    padded_patches = pad_sequence(all_patches, batch_first=True, padding_value=0)
-    padded_masks = pad_sequence(all_masks, batch_first=True, padding_value=0)
+        # Create subsets
+        train_indices = [idx for region in train_regions for idx in region_to_indices[region]]
+        val_indices = [idx for region in val_regions for idx in region_to_indices[region]]
+        
+        return {
+            "train": Subset(dataset, train_indices),
+            "val": Subset(dataset, val_indices),
+            "test": Subset(dataset, test_indices),
+        }
 
-    return padded_region_ids, padded_patches, padded_masks
+    @staticmethod
+    def custom_collate_fn(batch):
+        """
+        Custom collate function to handle variable-sized batches.
 
+        Args:
+            batch (list): List of (patches, masks, region_id) tuples.
 
-# Usage example
-root_dir = "data/PS-LitterLines"
-transform = transforms.Compose([transforms.ToTensor()])
-dataset = LitterLinesDataset(root_dir=root_dir, transform=transform)
-splits = split_dataset_by_region(dataset)
+        Returns:
+            tuple: Stacked patches, masks, and repeated region IDs.
+        """
+        all_patches, all_masks, all_region_ids = [], [], []
 
-# DataLoader for batching
-from torch.utils.data import DataLoader
-train_loader = DataLoader(dataset, batch_size=24, shuffle=False, collate_fn=custom_collate_fn) # TODO: Set shuffle to True
+        for patches, masks, region_id in batch:
+            if len(patches) == 0 or len(masks) == 0:
+                continue  # Skip empty returns
+            all_patches.extend(patches)
+            all_masks.extend(masks)
 
-# Iterate through the DataLoader
-for batch_idx, (region, images, masks) in enumerate(train_loader):
-    print(f"Batch {batch_idx}:")
-    print(f" - Region batch shape: {region.shape}")
-    print(f" - Image batch shape: {images.shape}")
-    print(f" - Mask batch shape: {masks.shape}")
-    break  # Stop after one batch for debugging
+            # Repeat the region_id to match the number of patches/masks
+            all_region_ids.extend([region_id] * len(patches))
+
+        # Stack patches and masks into batches
+        stacked_patches = torch.stack(all_patches)  # (N, C, H, W)
+        stacked_masks = torch.stack(all_masks)  # (N, H, W)
+
+        return stacked_patches, stacked_masks, all_region_ids
+
+    def get_dataloader(self, split, shuffle=True):
+        """
+        Returns a DataLoader for a given split.
+
+        Args:
+            split (str): One of "train", "val", or "test".
+            shuffle (bool): Whether to shuffle data (default: True for train).
+
+        Returns:
+            DataLoader: The PyTorch DataLoader for the given split.
+        """
+        if split not in self.splits:
+            raise ValueError(f"Invalid split name: {split}. Choose from 'train', 'val', or 'test'.")
+
+        return DataLoader(self.splits[split], batch_size=self.batch_size, shuffle=shuffle, collate_fn=self.custom_collate_fn)

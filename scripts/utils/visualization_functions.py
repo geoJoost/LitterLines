@@ -1,28 +1,15 @@
 import os
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
-from sklearn.decomposition import PCA
-import os
-import pandas as pd
-import matplotlib.pyplot as plt
-from sklearn.manifold import TSNE
-import seaborn as sns
-import os
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
 import ast
-import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import pandas as pd
-import os
-import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import matplotlib.patches as mpatches
+from matplotlib.colors import ListedColormap
 import seaborn as sns
 from sklearn.decomposition import PCA
+from scipy.spatial import ConvexHull
+import torch
 
 # Custom modules
 from utils.compute_spectral_indices import scene_to_ndi, scene_to_fdi
@@ -103,162 +90,21 @@ def plot_histogram(pixel_spec, l2a_bands, output_dir, sample_fraction=0.10):
     
     print(f"Histograms saved at: {output_path}")
 
-def plot_boxplot(cozar_dataset, l2a_bands, output_dir):
-    """
-    Plots boxplots for spectral bands, NDVI, NDI(B2,B8), and FDI.
-    
-    Parameters:
-    - cozar_dataset: DataFrame containing spectral reflectance data.
-    - plp2021: Numpy array containing the PLP2021 spectral reflectance data.
-    - l2a_bands: List of band names corresponding to spectral bands.
-    - output_dir: Directory path to save the output PNG file.
-    """
-    np.random.seed(42)  # Set seed for reproducibility
 
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
 
-    """ Cozar Predictions """
-    # Split the cozar dataset into L1C and L2A based on 'atm_level' column
-    cozar_L1C = cozar_dataset[cozar_dataset['atm_level'] == 'L1C']
-    cozar_L2A = cozar_dataset[cozar_dataset['atm_level'] == 'L2A']
-
-    # Extract only the band columns (B1, B2, ..., B12) from both L1C and L2A
-    cozar_L1C_reflectance = cozar_L1C[l2a_bands]
-    cozar_L2A_reflectance = cozar_L2A[l2a_bands]
-
-    """ PLP2021 """
-    # Get the number of bands
-    assert cozar_L1C_reflectance.shape[1] == plp2021.shape[0], "Number of bands must match for both datasets."
-
-    """ Descriptive statistics & data cleaning """
-    # Ensure zero values are filtered from both datasets
-    filtered_plp2021 = [band_data[band_data != 0] for band_data in plp2021]
-    filtered_cozar_L1C = [cozar_L1C_reflectance[band][cozar_L1C_reflectance[band] != 0].values for band in l2a_bands]
-    filtered_cozar_L2A = [cozar_L2A_reflectance[band][cozar_L2A_reflectance[band] != 0].values for band in l2a_bands]
-
-    # Print statistics side by side for each band
-    print(f"{'Band':<5} | {'PLP2021 Mean':<15} | {'Cozar L1C Mean':<15} | {'Cozar L2A Mean':<15} | "
-          f"{'PLP2021 Std Dev':<15} | {'Cozar L1C Std Dev':<15} | {'Cozar L2A Std Dev':<15} | "
-          f"{'PLP2021 Min':<15} | {'Cozar L1C Min':<15} | {'Cozar L2A Min':<15} | "
-          f"{'PLP2021 Max':<15} | {'Cozar L1C Max':<15} | {'Cozar L2A Max':<15}")
-    print("-" * 175)
-
-    for i, band in enumerate(l2a_bands):
-        # Compute statistics for PLP2021
-        plp_mean = np.mean(filtered_plp2021[i])
-        plp_std = np.std(filtered_plp2021[i])
-        plp_min = np.min(filtered_plp2021[i])
-        plp_max = np.max(filtered_plp2021[i])
-
-        # Compute statistics for Cozar L1C
-        cozar_L1C_mean = np.mean(filtered_cozar_L1C[i])
-        cozar_L1C_std = np.std(filtered_cozar_L1C[i])
-        cozar_L1C_min = np.min(filtered_cozar_L1C[i])
-        cozar_L1C_max = np.max(filtered_cozar_L1C[i])
-
-        # Compute statistics for Cozar L2A
-        cozar_L2A_mean = np.mean(filtered_cozar_L2A[i])
-        cozar_L2A_std = np.std(filtered_cozar_L2A[i])
-        cozar_L2A_min = np.min(filtered_cozar_L2A[i])
-        cozar_L2A_max = np.max(filtered_cozar_L2A[i])
-
-        # Print the statistics side by side for the current band
-        print(f"{i+1:<5} | {plp_mean:<15.4f} | {cozar_L1C_mean:<15.4f} | {cozar_L2A_mean:<15.4f} | "
-              f"{plp_std:<15.4f} | {cozar_L1C_std:<15.4f} | {cozar_L2A_std:<15.4f} | "
-              f"{plp_min:<15.4f} | {cozar_L1C_min:<15.4f} | {cozar_L2A_min:<15.4f} | "
-              f"{plp_max:<15.4f} | {cozar_L1C_max:<15.4f} | {cozar_L2A_max:<15.4f}")
-
-    """ Plotting """
-    # Create the boxplot
-    fig, ax = plt.subplots(figsize=(12, 6))
-
-    # X positions for the bands
-    positions = np.arange(1, len(l2a_bands) + 1)
-    width = 0.2  # Adjust width for three boxplots per band
-
-    # Colors for each dataset
-    colors = ['#0d3b66', '#faf0ca', '#ffa07a']  # PLP2021, Cozar L1C, Cozar L2A
-    outline_color = '#000000'  # Black outline color for the boxes
-    median_color = '#cc2936'
-
-    # Plot each band separately for the three datasets
-    for i, band in enumerate(l2a_bands):
-        # PLP2021 data (shifted to the left)
-        ax.boxplot(
-            filtered_plp2021[i],
-            positions=[positions[i] - width],
-            widths=width,
-            patch_artist=True,  # Allows coloring
-            boxprops=dict(facecolor=colors[0], edgecolor=outline_color, linewidth=1),
-            medianprops=dict(color=median_color),
-            flierprops=dict(marker='o', markerfacecolor=colors[0], markersize=4, alpha=0.4),
-            showfliers=True
-        )
-
-        # Cozar L1C Reflectance data (centered)
-        ax.boxplot(
-            filtered_cozar_L1C[i] / 10000,
-            positions=[positions[i]],
-            widths=width,
-            patch_artist=True,  # Allows coloring
-            boxprops=dict(facecolor=colors[1], edgecolor=outline_color, linewidth=1),
-            medianprops=dict(color=median_color),
-            flierprops=dict(marker='o', markerfacecolor=colors[1], markersize=4, alpha=0.4),
-            showfliers=True
-        )
-
-        # Cozar L2A Reflectance data (shifted to the right)
-        ax.boxplot(
-            filtered_cozar_L2A[i] / 10000,
-            positions=[positions[i] + width],
-            widths=width,
-            patch_artist=True,  # Allows coloring
-            boxprops=dict(facecolor=colors[2], edgecolor=outline_color, linewidth=1),
-            medianprops=dict(color=median_color),
-            flierprops=dict(marker='o', markerfacecolor=colors[2], markersize=4, alpha=0.4),
-            showfliers=True
-        )
-
-    # Customizing the X-ticks and labels
-    ax.set_xticks(positions)
-    ax.set_xticklabels(l2a_bands)
-
-    # Add labels and title
-    ax.set_ylabel('Reflectance [%]')
-    ax.set_title('Sentinel-2 reflectance comparison with PLP2021')
-
-    # Adding a custom legend
-    plp2021_count = int(np.count_nonzero(filtered_plp2021) / len(l2a_bands))  # Number of pixels
-    cozar_L1C_count = int(np.mean([np.count_nonzero(band) for band in filtered_cozar_L1C]) / len(l2a_bands))
-    cozar_L2A_count = int(np.mean([np.count_nonzero(band) for band in filtered_cozar_L2A]) / len(l2a_bands))
-
-    legend_elements = [
-        Patch(facecolor=colors[0], edgecolor=colors[0], label=f'PLP2021 (n={plp2021_count})'),
-        Patch(facecolor=colors[1], edgecolor=colors[1], label=f'Cozar L1C (n={cozar_L1C_count})'),
-        Patch(facecolor=colors[2], edgecolor=colors[2], label=f'Cozar L2A (n={cozar_L2A_count})')
-    ]
-    ax.legend(handles=legend_elements, loc='upper right')
-
-    # Improve layout
-    plt.tight_layout()
-
-    # Save the figure
-    plt.savefig(f"{output_dir}/s2_boxplots.png", dpi=300)
-    plt.close()
-
-    print("Boxplot printed")
-
-def plot_line_graph(cozar_csv, l2a_bands, output_dir, use_wavelengths=False):
+def plot_spectral_analysis(file_path, l2a_bands, output_dir, use_wavelengths=False, top_n=10):
     """
     Plots line graphs with MLW as the baseline signature in each subplot. 
     All other spectral signatures, including HDPE, are compared to MLW.
+    Also adds a third row with a large spectral angle distribution plot spanning all three columns.
 
     Parameters:
     - cozar_csv: Path to the CSV file containing spectral reflectance data (reference data).
     - l2a_bands: List of band names corresponding to spectral bands.
     - output_dir: Directory path to save the output PNG file.
     - use_wavelengths: If True, use wavelengths (in nm) for the X-axis. Otherwise, use band names.
+    - file_path: Path to the CSV file for spectral angle data (needed for the large figure).
+    - top_n: Number of top N lowest spectral angles to highlight.
     """
     # Mapping from bands to wavelengths
     wavelengths = {
@@ -267,14 +113,14 @@ def plot_line_graph(cozar_csv, l2a_bands, output_dir, use_wavelengths=False):
         "B8A": 864, "B9": 945, "B11": 1613, "B12": 2202
     }
     x_axis = [wavelengths[band] for band in l2a_bands] if use_wavelengths else l2a_bands
-    x_label = 'Wavelength (nm)' if use_wavelengths else 'Bands'
+    x_label = 'Wavelength [nm]' if use_wavelengths else 'Bands'
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
     """ Load and Process Data """
     # Load the Cozar dataset (MLW)
-    cozar_dataset = pd.read_csv(cozar_csv)
+    cozar_dataset = pd.read_csv(file_path)
     cozar_L1C = cozar_dataset[l2a_bands]
 
     # Calculate the mean and standard deviation for MLW
@@ -302,68 +148,97 @@ def plot_line_graph(cozar_csv, l2a_bands, output_dir, use_wavelengths=False):
         target_stds[label] = data[l2a_bands].std()
         target_n[label] = len(data)
 
-    """ Plotting Subplots """
-    # Define colors for each target
-    colors = {
-        "HDPE": '#ff7d00',
-        "PVC": '#15616d',
-        "HDPE-BF": '#001524',
-        "HDPE-C": '#8a3d62',
-        "wood": '#6c4f3d',
-        "Water": '#6495ED'  # Blue for Water
-    }
+    """ Create Figure with GridSpec """
+    # Create a 3-row grid with equal height for each row
+    fig = plt.figure(figsize=(6, 10))
+    gs = gridspec.GridSpec(3, 3, height_ratios=[1, 1, 1])  # Equal height for all rows
 
-    # Define markers for each target
-    markers = {
-        "HDPE": 'x',       # 'x' marker
-        "PVC": 's',        # Square marker
-        "HDPE-BF": '^',    # Triangle marker
-        "HDPE-C": 'D',     # Diamond marker 
-        "wood": 'H',       # Hexagon marker
-        "Water": 'o'       # Circle marker for Water
-    }
-
-    # Adjust the number of subplots
-    ncols = 2
-    nrows = (len(targets) + 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(12, nrows * 4))
-    axes = axes.flatten()  # Flatten for easy iteration
-
+    # 1. First two rows: Create subplots for each target
+    axes = []  # List to hold the axes for the first 6 subplots.
     for i, label in enumerate(targets):
-        ax = axes[i]
-
+        ax = fig.add_subplot(gs[i // 3, i % 3])
+        axes.append(ax)
         # Plot MLW (baseline signature) in each subplot
-        ax.plot(x_axis, mlw_means, label=f"MLW (n={mlw_n})", color='#6494aa', linewidth=2, marker='o', ms=5)
-        ax.fill_between(x_axis, mlw_means - mlw_stds, mlw_means + mlw_stds, color='#6494aa', alpha=0.2)
+        ax.plot(x_axis, mlw_means, label=f"MLW (n={mlw_n})", color='#6494aa',
+                linewidth=2, marker='o', ms=5)
+        ax.fill_between(x_axis, mlw_means - mlw_stds, mlw_means + mlw_stds,
+                        color='#6494aa', alpha=0.2)
 
         # Plot the target dataset in the current subplot
         ax.plot(x_axis, target_means[label], label=f"{label} (n={target_n[label]})", 
-                color=colors[label], linewidth=2, marker=markers[label], markersize=5)
-        ax.fill_between(x_axis, target_means[label] - target_stds[label], 
-                        target_means[label] + target_stds[label], color=colors[label], alpha=0.2)
+                color={'HDPE': '#ff7d00', 'PVC': '#15616d', 'HDPE-BF': '#001524',
+                       'HDPE-C': '#8a3d62', 'wood': '#6c4f3d', 'Water': '#6495ED'}[label],
+                linewidth=2, marker={'HDPE': 'x', 'PVC': 's', 'HDPE-BF': '^',
+                                       'HDPE-C': 'D', 'wood': 'H', 'Water': 'o'}[label],
+                markersize=5)
+        ax.fill_between(x_axis, target_means[label] - target_stds[label],
+                        target_means[label] + target_stds[label],
+                        color={'HDPE': '#ff7d00', 'PVC': '#15616d', 'HDPE-BF': '#001524',
+                               'HDPE-C': '#8a3d62', 'wood': '#6c4f3d', 'Water': '#6495ED'}[label],
+                        alpha=0.2)
 
         # Customize subplot
-        ax.set_title(f'{label}')
+        #ax.set_title(f'{label}')
         ax.set_ylim(bottom=0)
         ax.grid(True, linestyle='--', linewidth=0.5)
-        ax.set_xlabel(x_label)
-        if i % ncols == 0:
-            ax.set_ylabel('Reflectance')
-
-        # Add legend
+        if i >= 3:
+            ax.set_xlabel(x_label)
+        if i % 3 == 0:
+            ax.set_ylabel('TOA reflectance')
         ax.legend(loc='upper right')
 
-    # Hide unused subplots
-    for j in range(i + 1, len(axes)):
-        fig.delaxes(axes[j])
+    # 2. Third row: Create a large axis spanning all 3 columns for spectral angle distribution.
+    ax_angle = fig.add_subplot(gs[2, :])
 
-    # Improve layout
+    # (x_axis is redefined here if needed)
+    x_axis = [wavelengths[band] for band in l2a_bands]
+
+    # Load the data for spectral angles
+    df = pd.read_csv(file_path)
+
+    # Filter relevant columns and melt the data for easier plotting
+    spectral_angles = ['sam_HDPE', 'sam_PVC', 'sam_HDPE_BF', 'sam_water']
+    rename_mapping = {'sam_HDPE': 'HDPE', 'sam_PVC': 'PVC',
+                        'sam_HDPE_BF': 'HDPE-BF', 'sam_water': 'Water'}
+    df_melted = df.melt(id_vars=l2a_bands + ['date'], 
+                        value_vars=spectral_angles, 
+                        var_name='Target', 
+                        value_name='spectral_angle')
+    df_melted['Target'] = df_melted['Target'].map(rename_mapping)
+    df_melted = df_melted.dropna(subset=['spectral_angle'])
+
+    # Top-N lowest spectral angles (if needed)
+    top_spectral = df_melted.nsmallest(top_n, 'spectral_angle')
+
+    # Define custom colors for the spectral angle plot
+    angle_colors = {
+        "HDPE": '#ff7d00',
+        "PVC": '#15616d',
+        "HDPE-BF": '#001524',
+        "Water": '#6495ED',
+        "Cozar": '#ccc5b9'
+    }
+    palette = {key: angle_colors[key] for key in df_melted['Target'].unique() if key in angle_colors}
+
+    # Plot the spectral angle distribution on the large axis
+    sns.histplot(data=df_melted, x='spectral_angle', hue='Target', ax=ax_angle, kde=True, palette=palette)
+    #ax_angle.set_title('Spectral Angle Distribution')
+    ax_angle.set_xlabel('Spectral angle [°]')
+    ax_angle.set_ylabel('Frequency')
+    ax_angle.grid(True, linestyle='--', alpha=0.7)
+
+    # Set identical Y-limits for all subplots
+    all_y_values = [ax.get_ylim() for ax in axes]
+    y_min = min([y[0] for y in all_y_values])
+    y_max = max([y[1] for y in all_y_values])
+    for ax in axes:
+        ax.set_ylim(y_min, y_max)
+
     plt.tight_layout()
-
-    # Save the figure
-    output_filename = "s2_linegraph_wl.png" if use_wavelengths else "s2_linegraph.png"
+    output_filename = "spectral_analysis"
     output_path = os.path.join(output_dir, output_filename)
-    plt.savefig(output_path, dpi=300)
+    plt.savefig(f"{output_path}.png", dpi=300)
+    plt.savefig(f"{output_path}.pdf", dpi=300)
     plt.close()
 
     print(f"Spectral reflectance subplot graph (vs MLW) saved to {output_path}")
@@ -385,7 +260,7 @@ def plot_individual_spectra(cozar_csv, l2a_bands, output_dir, use_wavelengths=Fa
         "B8A": 864, "B9": 945, "B11": 1613, "B12": 2202
     }
     x_axis = [wavelengths[band] for band in l2a_bands] if use_wavelengths else l2a_bands
-    x_label = 'Wavelength (nm)' if use_wavelengths else 'Bands'
+    x_label = 'Wavelength [nm]' if use_wavelengths else 'Bands'
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -490,7 +365,7 @@ def plot_random_spectra(cozar_csv, l2a_bands, output_dir, use_wavelengths=True, 
     
     # Determine the x-axis values (either wavelengths or band names)
     x_axis = [wavelengths[band] for band in l2a_bands] if use_wavelengths else l2a_bands
-    x_label = 'Wavelength (nm)' if use_wavelengths else 'Bands'
+    x_label = 'Wavelength [nm]' if use_wavelengths else 'Bands'
 
     # Load the Cozar dataset
     cozar_dataset = pd.read_csv(cozar_csv)
@@ -886,7 +761,7 @@ def plot_spectral_angle_signatures(file_path, l2a_bands, top_n=5):
         axes[1].plot(x_axis, band_values, marker='o', label=f"{row['target']}: {row['spectral_angle']:.1f}°", color=colors.get(row['target'], '#000000'))
 
     axes[1].set_title(f'Spectral Signatures of Top-{top_n} Observations by Lowest Spectral Angle')
-    axes[1].set_xlabel('Wavelength (nm)')
+    axes[1].set_xlabel('Wavelength [nm]')
     axes[1].set_ylabel('Reflectance')
     axes[1].legend(title='Target: Spectral Angle (°)', loc='upper right')
     axes[1].grid(visible=True, linestyle='--', alpha=0.7)
@@ -898,91 +773,196 @@ def plot_spectral_angle_signatures(file_path, l2a_bands, top_n=5):
     plt.savefig("doc/figures/spectral_angle_signatures.png")
     print('Plot saved as "doc/figures/spectral_angle_signatures.png"')
 
-def plot_tsne(cozar_dataset, l2a_bands, output_dir, perplexity=30, learning_rate=200, n_iter=1000):
-    """
-    Generates and plots a t-SNE visualization for the spectral data, including L1C, L2A, and other datasets (HDPE, Wood, HDPE+Wood).
+def plot_featurespace(test_loader, train_loader, val_loader):
+    """Generate scatter plots comparing RAI and NDVI between the test region and each training/validation region."""
+    def compute_indices(image_batch):
+        """ Compute NDVI and RAI for a batch of images. """
+        blue, green, red, nir = image_batch[:, 0], image_batch[:, 1], image_batch[:, 2], image_batch[:, 3]
+        epsilon = 1e-10
+        ndvi = (nir - red) / (nir + red + epsilon)
+        rai = (nir - blue) / (nir + blue + epsilon)
+        return ndvi, rai
     
-    Parameters:
-    - cozar_dataset: DataFrame containing spectral reflectance data with 'atm_level' column.
-    - l2a_bands: List of band names corresponding to spectral bands (e.g., ['B1', 'B2', ..., 'B12']).
-    - output_files: Dictionary containing paths to additional datasets, e.g., {'HDPE': path_to_hdpe, 'Wood': path_to_wood, 'HDPE+Wood': path_to_hdpe_wood}.
-    - output_dir: Directory path to save the output PNG file.
-    - perplexity: t-SNE perplexity parameter, which affects the balance between local and global aspects of the data.
-    - learning_rate: t-SNE learning rate parameter.
-    - n_iter: Maximum number of iterations for optimization.
-    """
-    # Paths to the three CSV files
-    output_files = {
-        "HDPE": "data/processed/HDPE_reflectance.csv",
-        "PVC": "data/processed/PVC_reflectance.csv",
-        "HDPE-BF": "data/processed/HDPE-BF_reflectance.csv",
-        "HDPE-C": "data/processed/HDPE-C_reflectance.csv",
-        "HDPE+Wood": "data/processed/HDPE+Wood_reflectance.csv",
-        "wood": "data/processed/wood_reflectance.csv"
-    }
+    # Extract test data
+    test_images, test_masks, test_region_ids = next(iter(test_loader))
+    test_ndvi, test_rai = compute_indices(test_images)
 
-    # Colors for the datasets
-    colors = {
-        "HDPE": '#6494aa',
-        "LW (L1C)": '#a63d40',  # Litter windrow (L1C)
-        "LW (L2A)": '#e9b872',  # Litter windrow (L2A)
-        "PVC": '#6a5acd',
-        "HDPE-BF": '#4682b4',
-        "HDPE-C": '#ff6347',
-        "HDPE+Wood": '#904ca9',
-        "wood": '#90a959'
-    }
+    # Extract only pixels belonging to MLWs (masked regions)
+    test_ndvi_select = test_ndvi[test_masks.bool()]
+    test_rai_select = test_rai[test_masks.bool()]
+    
+    # Combine train and val loaders
+    combined_loaders = {"Train": train_loader, "Validation": val_loader}
+    
+    # Store unique regions
+    unique_regions = {}
 
+    for loader_name, loader in combined_loaders.items():
+        for images, masks, region_ids in loader:
+            for i in range(images.shape[0]):  # Loop over batch elements
+                region_id = region_ids[i]
+                
+                if region_id not in unique_regions:
+                    unique_regions[region_id] = {
+                        "ndvi": [], 
+                        "rai": [], 
+                        "name": f"{loader_name} Region {region_id}",
+                        "region": region_id
+                    }
+                
+                # Compute indices for the specific image
+                ndvi, rai = compute_indices(images[i].unsqueeze(0))  # Keep batch dimension
+                ndvi = ndvi.squeeze(0)
+                rai = rai.squeeze(0)
+                
+                # Extract only pixels belonging to MLWs
+                ndvi_select = ndvi[masks[i].bool()]
+                rai_select = rai[masks[i].bool()]
 
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
+                # Store data separately per region
+                unique_regions[region_id]["ndvi"].append(ndvi_select)
+                unique_regions[region_id]["rai"].append(rai_select)
+    
+    # Create subplots (adjusting rows and columns to fit 13 subplots without extra grids)
+    num_regions = len(unique_regions)
+    num_plots = num_regions + 1  # One extra plot for the test data
 
-    """ Prepare Cozar data (L1C, L2A) """
-    cozar_L1C = cozar_dataset[cozar_dataset['atm_level'] == 'L1C'][l2a_bands]
-    cozar_L2A = cozar_dataset[cozar_dataset['atm_level'] == 'L2A'][l2a_bands]
+    # Calculate number of rows and columns to fit all plots without empty grids
+    ncols = (num_plots + 2) // 3  # At least 3 rows, as you have 13 plots in total
+    nrows = (num_plots + ncols - 1) // ncols  # Adjust rows based on number of columns
 
-    # Labels for L1C and L2A
-    data = pd.concat([cozar_L1C, cozar_L2A])
-    labels = ['LW (L1C)'] * len(cozar_L1C) + ['LW (L2A)'] * len(cozar_L2A)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(0.8 * num_plots, 0.6 * num_plots), sharex=True, sharey=True, constrained_layout=True)
 
-    """ Add HDPE, Wood, HDPE+Wood datasets """
-    for label, output_file in output_files.items():
-        # Load the dataset
-        additional_data = pd.read_csv(output_file)
+    # Flatten the axes for easy iteration
+    axes = axes.flatten()
 
-        # Extract the bands and append to the data
-        data = pd.concat([data, additional_data[l2a_bands]])
-        labels += [label] * len(additional_data)
+    # Ensure axes is iterable if there's only one region
+    if num_regions == 1:
+        axes = [axes]
 
-    """ Perform t-SNE """
-    tsne = TSNE(n_components=2, perplexity=perplexity, learning_rate=learning_rate, max_iter=n_iter, random_state=42)
-    tsne_results = tsne.fit_transform(data)
+    # Remove extra axes if any (this happens if the subplot grid is larger than needed)
+    for ax in axes[num_plots:]:
+        ax.axis('off')  # Hide axes that are not used
 
-    """ Plot the t-SNE results """
-    tsne_df = pd.DataFrame(tsne_results, columns=['Dim 1', 'Dim 2'])
-    tsne_df['Label'] = labels
+    # Convert test dataset to NumPy for processing
+    test_ndvi_np = test_ndvi_select.numpy()
+    test_rai_np = test_rai_select.numpy()
+    test_points = np.column_stack((test_ndvi_np, test_rai_np))  # Combine into (x, y) points
 
-    # Use seaborn to create a scatter plot with different colors for each dataset
-    plt.figure(figsize=(10, 8))
-    sns.scatterplot(x='Dim 1', y='Dim 2', 
-                    hue='Label', 
-                    palette=colors,
-                    data=tsne_df, 
-                    s=100, alpha=0.7)
+    # Compute the convex hull (if there are enough points)
+    hull = None
+    if len(test_points) > 2:
+        hull = ConvexHull(test_points)
+        hull_vertices = test_points[hull.vertices]  # Get the boundary points
 
-    # Customize plot
-    plt.title('t-SNE plot of spectral reflectance')
-    plt.legend(loc='best', title='Class')
-    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+    # Plot the test data on the first subplot
+    ax = axes[0]
+    ax.scatter(test_ndvi_np, test_rai_np, alpha=0.3, s=3, c="#F2CC8F", label="Validated MLW")
+    ax.set_xlabel("NDVI", fontsize=8)
+    ax.set_ylabel("RAI", fontsize=8)
+    handles = [mpatches.Patch(facecolor="#F2CC8F", label="Validated MLW")]
+    ax.legend(handles=handles, loc='upper left', fontsize=8)
 
-    # Set Y-axis to 0 as negative values are not possible
-    #plt.ylim(0)
+    # Loop through the remaining regions and plot training data
+    for idx, (ax, (region_id, data)) in enumerate(zip(axes[1:], unique_regions.items())):
+        # Concatenate NDVI/RAI values for this region
+        ndvi_concat = torch.cat(data["ndvi"]).numpy()
+        rai_concat = torch.cat(data["rai"]).numpy()
 
-    plt.tight_layout()
+        # Plot the training data
+        ax.scatter(ndvi_concat, rai_concat, alpha=0.3, s=3, c="#3D405B")
 
-    # Save the plot
-    output_path = os.path.join(output_dir, "s2_tsne_plot.png")
-    plt.savefig(output_path, dpi=300)
+        # Plot the convex hull outline of the test dataset
+        if hull is not None:
+            ax.plot(hull_vertices[:, 0], hull_vertices[:, 1], "--", color="#F2CC8F", linewidth=1.5)
+
+        ax.set_xlabel("NDVI", fontsize=8)
+        ax.set_ylabel("RAI", fontsize=8)
+
+        # Add legend for the training data, reformat from '20201202_Egypt' to '2020-12-02, Egypt'
+        label = f"{data['region'][:4]}-{data['region'][4:6]}-{data['region'][6:8]}, {data['region'][9:]}"
+        handles = [mpatches.Patch(facecolor="#3D405B", label=label)]
+        ax.legend(handles=handles, loc='upper left', fontsize=8)
+
+    # Save the figure
+    plt.savefig('doc/figures/litterlines_distribution.png', dpi=600, bbox_inches='tight')
+    plt.savefig('doc/figures/litterlines_distribution.pdf')
     plt.close()
 
-    print(f"t-SNE plot saved at {output_path}")
+def plot_litterlines_patches(images, masks, region_ids):
+    num_patches = 5  # Number of patches to visualize
+
+    # Convert tensors to numpy arrays
+    images = images.cpu().numpy()
+    masks = masks.cpu().numpy()
+    region_ids = np.array(region_ids)  # Convert to NumPy array for easy filtering
+
+    # Get unique regions and one index per region
+    unique_regions, unique_indices = np.unique(region_ids, return_index=True)
+
+    # Select up to `num_patches` unique regions
+    selected_indices = unique_indices[:num_patches]
+
+    # Define colormap for mask visualization
+    binary_cmap = ListedColormap(['#FCF3EE', '#68000D'])
+
+    # Custom colormap for NDVI/RAI to handle 0.0 as black
+    cmap_ndvi = plt.cm.coolwarm
+    cmap_ndvi.set_bad(color='black')  # Masked values appear black
+
+    cmap_rai = plt.cm.coolwarm
+    cmap_rai.set_bad(color='black')  # Masked values appear black
+
+    # Create a 4x4 grid for visualization
+    fig, axes = plt.subplots(num_patches, 4, figsize=(6.5, 7), constrained_layout=True)
+
+    for i, idx in enumerate(selected_indices):
+        image_patch = images[idx]
+        mask_patch = masks[idx]
+        region_id = region_ids[idx]
+
+        blue, green, red, nir = image_patch
+        rgb = np.stack([red, green, blue])
+
+        # Normalize RGB channels
+        vmin_rgb, vmax_rgb = 0, 0.15
+        rgb_normalized = np.clip((rgb - vmin_rgb) / (vmax_rgb - vmin_rgb), 0, 1)
+        rgb_image = rgb_normalized.transpose(1, 2, 0)
+
+        # Compute indices
+        epsilon = 1e-10
+        ndvi = (nir - red) / (nir + red + epsilon)
+        rai = (nir - blue) / (nir + blue + epsilon)
+
+        vmin_ndvi, vmax_ndvi = -0.20, 0.05
+        vmin_rai, vmax_rai = -0.5, 0
+
+        # Mask 0.0 values
+        ndvi_masked = np.ma.masked_where(ndvi == 0.0, ndvi)
+        rai_masked = np.ma.masked_where(rai == 0.0, rai)
+
+        axes[i, 0].imshow(rgb_image, vmin=0, vmax=1)
+        axes[i, 0].axis('off')
+        axes[0, 0].set_title("RGB", fontsize=11)
+
+        im1 = axes[i, 1].imshow(ndvi_masked, cmap=cmap_ndvi, vmin=vmin_ndvi, vmax=vmax_ndvi)
+        axes[0, 1].set_title("NDVI", fontsize=11)
+        axes[i, 1].axis('off')
+
+        im2 = axes[i, 2].imshow(rai_masked, cmap=cmap_rai, vmin=vmin_rai, vmax=vmax_rai)
+        axes[0, 2].set_title("RAI", fontsize=11)
+        axes[i, 2].axis('off')
+
+        axes[i, 3].imshow(mask_patch, cmap=binary_cmap)
+        axes[0, 3].set_title("Label", fontsize=11)
+        axes[i, 3].axis('off')
+
+        fig.colorbar(im1, ax=axes[i, 1], fraction=0.046, pad=0.04)
+        fig.colorbar(im2, ax=axes[i, 2], fraction=0.046, pad=0.04)
+
+        #axes[i, 0].annotate(region_id, xy=(-0.1, 0.5), xycoords='axes fraction',
+        #                    fontsize=10, ha='right', va='center')
+
+    plt.savefig('doc/figures/litterlines_patches.png', dpi=600, bbox_inches='tight')
+    plt.savefig('doc/figures/litterlines_patches.pdf')
+    plt.close()

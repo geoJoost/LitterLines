@@ -1,174 +1,123 @@
-import os
-import numpy as np
-import xarray as xr
-import dask.array as da
-import rioxarray as rxr
-import matplotlib.pyplot as plt
-import time
 import pandas as pd
+import torch
 
 # Custom modules
-from utils.visualization_functions import *
-from core.extract_cozar_reflectance import process_cozar_data
-from core.spectral_analysis import get_plp_scenes, spectral_similarity, print_spectral_angles
-from utils.planet_functions import planet_query
-from utils.gee_downloader import get_date_from_product
-from utils.create_water_samples import generate_water_points
-from utils.organise_annotation_folders import process_spectral_angles
+from core.dataloader import LitterLinesDataset, DatasetManager
+from utils.visualization_functions import plot_featurespace, plot_litterlines_patches
 
-# Define start time to measure how long the script takes to complete
-start = time.time()
+def process_litterlines(root_dir, plot_figures=True):
+    # Define LitterLines dataset
+    transform = None  # Placeholder for transforms if needed
+    dataset = LitterLinesDataset(root_dir=root_dir, transform=transform)
 
-def process_cozar_predictions(netcdf_path, plot_figures=True):
-    # TODO: Kept for archival purposes; or in case geocorrection becomes feasible
-    #csv_dir = "data/test"
-    #out_dir = "data/processed"
-    #cozar_reflectance = process_cozar_data(netcdf_path, csv_dir, out_dir)
+    # Initialize DatasetManager
+    manager = DatasetManager(dataset, train_ratio=0.8, val_ratio=0.2, batch_size=30) # TODO: Fine-tune the batch_size variable
+    print("DatasetManger called")
     
-    # Acquire and process Plastic Litter Project using L1C reflectance
-    # We acquire reflectance for the following targets: HDPE, wood, HDPE+wood for PLP2021
-    # and PVC, HDPE-Clean, HDPE-BioFouled for PLP2022
-    tif_dir = "data/plp_tiles"
-    plp2021 = get_plp_scenes('data/raw/PLP2021_targets.shp', tif_dir)
-    plp2022 = get_plp_scenes('data/raw/PLP2022_targets.shp', tif_dir)
+    # Get DataLoaders
+    # Training/validation datasets are random selection from the LitterLines dataset
+    train_loader = manager.get_dataloader("train") # (80%)
+    val_loader = manager.get_dataloader("val", shuffle=False) # (20%)
+    test_loader = manager.get_dataloader("test", shuffle=False) # Five PlanetScope scenes from Kikaki et al. (2020) taken on 2017-10-09
     
-    # Create a dataset of randomly generated points in the Gulf of Gera
-    generate_water_points(output_path="data/raw/water_px.shp")
-    get_plp_scenes('data/raw/water_px.shp', tif_dir)
-
-    # Check if the file already exists
-    output_file = 'data/processed/cozar_reflectance.csv'
-    if not os.path.exists(output_file):
-        # Read in the predictions
-        cozar_data = xr.open_dataset(netcdf_path)
-
-        # Extract spectral bands for filtering; output should correspond to TOA reflectance with L2A bands
-        spectral_bands = cozar_data.attrs['spectral_bands'].split(', ')
-        l2a_bands = [band for band in spectral_bands if band != "B10"]
-
-        # Placeholder for the final DataFrame
-        columns = [
-            'B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B9', 'B11', 'B12',
-            'lat_centroid', 'lon_centroid', 'date', 'sam_HDPE', 'sam_PVC', 'sam_HDPE_BF', 'sam_water',
-            's2_product', 'potential_overlap', 'image_ids', 'sensor_ids', 'image_types'
-        ]
-        final_data = []
-        
-        # Process each marine litter windrow filament
-        for i in range(len(cozar_data['s2_product'])):
-            # TODO - Debugging: stop after processing a few filaments
-            #if i > 100:
-            #    print('Processing completed for a few filaments.')
-            #    break
-            
-            # Extract product name and metadata
-            s2_product = cozar_data['s2_product'][i].item().decode()
-            lat_centroid = cozar_data['lat_centroid'][i].values
-            lon_centroid = cozar_data['lon_centroid'][i].values
-            date = get_date_from_product(s2_product)
-
-            # Query for spatial-temporal overlap between Sentinel-2 and PlanetScope
-            potential_overlap, image_ids, sensor_ids, types = planet_query(lat_centroid, lon_centroid, date)
-            
-            # Process each pixel within the current filament
-            pixel_spec = cozar_data['pixel_spec'][i].values  # L1C reflectance
-            pixel_spec = pixel_spec[~np.isnan(pixel_spec).any(axis=1)]  # Remove rows that contain any NaN values
-            pixel_spec = pixel_spec[:, [l2a_bands.index(band) for band in l2a_bands]]  # Exclude B10 from analysis
-            
-            # Define target files for the spectral angle computation
-            target_files = {
-                "HDPE": "data/processed/HDPE_reflectance.csv",  # HDPE from PLP2021
-                "PVC": "data/processed/PVC_reflectance.csv",  # PVC from PLP2022
-                "HDPE-BF": "data/processed/HDPE-BF_reflectance.csv",  # Biofouled HDPE from PLP2022
-                "Water": "data/processed/Water_reflectance.csv" # Randomly selected water pixels (n=205) in 2021/2022
-            }
-
-            for pix_reflectance in pixel_spec:
-                # Compute spectral angle (SAM) for this pixel
-                sam_results = spectral_similarity(pix_reflectance, target_files)
-
-                # Append the data row for the pixel
-                final_data.append([
-                    *pix_reflectance,  # Reflectance for bands B1-B12
-                    lat_centroid, 
-                    lon_centroid, 
-                    date, 
-                    sam_results[0],  # SAM for HDPE
-                    sam_results[1],  # SAM for PVC
-                    sam_results[2],  # SAM for HDPE-BF
-                    sam_results[3],  # SAM for water
-                    s2_product,
-                    potential_overlap, 
-                    image_ids, 
-                    sensor_ids,
-                    types
-                ])
-
-        # Convert to DataFrame
-        final_df = pd.DataFrame(final_data, columns=columns)
-
-        # Save to a CSV file or other format
-        final_df.to_csv(output_file, index=False)
-        print(f"Data saved to {output_file}")
-    else:
-        print(f"The file {output_file} already exists. Skipping processing.")
-
-    # Plotting functions
     if plot_figures:
-        print('Printing figures')
+        # This visualization function plots five patches (256px) from the LitterLines dataset in RGB, NDVI, RAI, and the label
+        images, masks, region_ids = next(iter(train_loader))
+        plot_litterlines_patches(images, masks, region_ids)
         
-        # Define spectral bands for Sentinel-2; differ from original as they do not include zeros (i.e., B04 => B4)
-        l2a_bands = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B9', 'B11', 'B12']
-
-        # Plot histogram of Cozar predictions. We sample 10% of the >36 million pixels
-        #plot_histogram(pixel_spec, l1_bands, output_dir='doc/figures', sample_fraction=0.10)
-
-        # Boxplot
-        #plot_boxplot(cozar_reflectance, l2a_bands, output_dir='doc/figures')
-        
-        # Plot spectral signatures of the PLP targets
-        plot_individual_spectra(output_file, l2a_bands, output_dir='doc/figures', use_wavelengths=True)
-        
-        # Plot 1000 random spectral signatures from the Cozar dataset
-        plot_random_spectra(output_file, l2a_bands, output_dir='doc/figures', use_wavelengths=True, n_random=1000)
-
-        # Spectral signature line graph
-        plot_line_graph(output_file, l2a_bands, output_dir='doc/figures', use_wavelengths=True)
-        plot_line_graph(output_file, l2a_bands, output_dir='doc/figures', use_wavelengths=False)
-        
-        # SAM's and top-5 MLW's
-        plot_spectral_angle_signatures(output_file, l2a_bands, top_n=5)
-        
-        # Scatterplot of MLW + targets using NDVI-FDI
-        plot_scatter(output_file, output_dir='doc/figures')
-
-        # PCA
-        plot_pca(output_file, l2a_bands, output_dir="doc/figures")
-        
-        # Plot PlanetScope statistics
-        plot_planetscope_acquisitions(output_file)
-        
-        # T-SNE plot with Spectral Angle Mapping
-        # TODO: This needs a revamp including: Spectral Angle Mapping as distance metric, and tuning of perplexity value
-        #plot_tsne(cozar_reflectance, l2a_bands, output_dir='doc/figures')
-    
-    # Output the potential PlanetScope scenes
-    print_spectral_angles(output_file, top_n=10, spatial_overlap='yes')
-
-    # Prepare annotation folders by:
-    ## Downloading Sentinel-2 data (~25km)
-    ## Computing the FDI and NDI_B2B8
-    ## Preparing metadata
-    process_spectral_angles(csv_file=output_file, top_n=40, include_overlap=True)
-
-    # 
+        # This function plots the data for each unique region using NDVI-RAI, compared to validated MLWs from Kikaki et al. (2020)
+        plot_featurespace(test_loader, train_loader, val_loader)
     
 
-   
+    # Just for testing, GPT code for generating a RF model + small tuning for hyperpameters
+    # Results were poor (IoU ~2.5%) due to massive imbalance in the dataset   
+    def train_random_forest(train_loader, val_loader, n_positive=70000, n_negative=70000):
+        import numpy as np
+        import torch
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.metrics import accuracy_score, f1_score, jaccard_score
+        
+        np.random.seed(42)
+        
+        # Step 1: Prepare training data
+        train_images, train_masks, region_ids = next(iter(train_loader))
+        
+        # Initialize empty lists for training features (X_train) and labels (y_train)
+        X_train = []
+        y_train = []
+        
+        # Step 2: Process each image to select target (1) and non-target (0) pixels
+        for image, mask in zip(train_images, train_masks):
+            # Flatten the image and mask
+            image_flat = image.view(-1, 4).numpy()  # Flatten image to (num_pixels, 4) where 4 corresponds to VNIR bands
+            mask_flat = mask.view(-1).numpy()  # Flatten the mask to (num_pixels,)
+            
+            # Get indices for target pixels (1) and non-target pixels (0)
+            target_indices = np.where(mask_flat == 1)[0]
+            non_target_indices = np.where(mask_flat == 0)[0]
+            
+            # Calculate number of pixels to sample from each class
+            n_pos_to_sample = min(n_positive // len(train_images), len(target_indices))
+            n_neg_to_sample = min(n_negative // len(train_images), len(non_target_indices))
+            
+            # Randomly select target and non-target pixels
+            positive_pixels = np.random.choice(target_indices, n_pos_to_sample, replace=False)
+            negative_pixels = np.random.choice(non_target_indices, n_neg_to_sample, replace=False)
+            
+            # Append selected pixels to the training data
+            X_train.append(image_flat[positive_pixels])  # Features of positive pixels
+            X_train.append(image_flat[negative_pixels])  # Features of negative pixels
+            y_train.append(mask_flat[positive_pixels])  # Labels of positive pixels (1)
+            y_train.append(mask_flat[negative_pixels])  # Labels of negative pixels (0)
+        
+        # Convert lists to numpy arrays
+        X_train = np.vstack(X_train)
+        y_train = np.concatenate(y_train)
+        
+        # GPT code for Random Forets model, hyperparameter search using RandomizedSearchCV
+        # Performance was incredibly poor (IoU ~2.5%), due to massive imbalance in the dataset
+        clf = RandomForestClassifier(
+            n_estimators=300, 
+            criterion='gini',
+            min_samples_split=10,
+            min_samples_leaf=50,
+            max_features='sqrt',
+            max_depth=None,
+            oob_score=True,  # Helps estimate generalization
+            class_weight={0:1, 1:10}, #'balanced_subsample',  # For imbalanced classes
+            random_state=42,
+            n_jobs=-1  # Parallel processing
+        )
 
+        clf.fit(X_train, y_train)  # Fit the classifier to the selected pixels
 
+        # Step 4: Evaluate the model on the validation set
+        val_images, val_masks, _ = next(iter(val_loader))
 
+        # Flatten the validation images and masks
+        X_val = val_images.view(val_images.size(0), -1, 4).numpy()  # Shape: (n_val_patches, 4 * 256 * 256)
+        y_val = val_masks.view(val_masks.size(0), -1).numpy().astype(int)  # Shape: (n_val_patches, 256 * 256)
 
-process_cozar_predictions(netcdf_path="data/raw/WASP_LW_SENT2_MED_L1C_B_201506_202109_10m_6y_NRT_v1.0.nc", plot_figures=True)
+        # Flatten validation masks to 1D
+        y_val_flat = y_val.flatten()
 
-print(f"Script finished in {round(time.time() - start, 2)} seconds")
+        # Step 5: Make predictions
+        y_pred = clf.predict(X_val.reshape(-1, 4))  # Predict the class for each pixel
+
+        # Step 6: Calculate metrics using sklearn
+        accuracy = accuracy_score(y_val_flat, y_pred)
+        f1 = f1_score(y_val_flat, y_pred, average='binary')  # Binary F1-score
+        iou = jaccard_score(y_val_flat, y_pred, average='binary')  # Binary IoU (Jaccard Index)
+
+        print(f"Validation accuracy: {accuracy * 100:.2f}%")
+        print(f"F1-score: {f1:.4f}")
+        print(f"IoU (Jaccard): {iou * 100:.2f}%")
+        print('..')
+
+    # Call the function to train and validate the model
+    train_random_forest(train_loader, val_loader, n_positive=70000, n_negative=70000)
+
+    
+# Processing of the created dataset for dataset validation, and future future model development
+process_litterlines(root_dir="data/LitterLines", plot_figures=False)
+

@@ -1,5 +1,5 @@
-import sys, os  # TODO: Remove. Kept for debugging
-sys.path.append(os.path.join(os.getcwd(), 'scripts'))
+import os
+import time
 import requests
 from requests.auth import HTTPBasicAuth
 
@@ -15,10 +15,9 @@ This script utilizes the Planet API to search for and order satellite images bas
 acquisition date, and cloud cover.
 
 '''
-import time  # Import time module at the top
 
 def planet_query(lat_centroid, lon_centroid, date):
-    ## Put your API key here
+    # Put your API key here
     os.environ['PL_API_KEY'] = credentials.PLANET_KEY
 
     # Setup the API Key from the `PL_API_KEY` environment variable
@@ -163,7 +162,3 @@ def planet_query(lat_centroid, lon_centroid, date):
                 error_log.write(f"Unexpected error for query: lat={lat_centroid}, lon={lon_centroid}, date={date}\n")
                 error_log.write(f"Error: {str(e)}\n")
             return 'no', [], [], []
-
-#lat_centroid = 36.82
-#lon_centroid = -6.49
-#potential_overlap, image_ids, sensor_ids, types = planet_query(lat_centroid, lon_centroid, '2018-10-22')
