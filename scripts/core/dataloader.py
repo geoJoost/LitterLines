@@ -50,7 +50,7 @@ class LitterLinesDataset(Dataset):
                 continue  # Skip if no valid images or metadata
 
             # Extract region ID from path
-            region_id = scene_folder.split("/")[2]  # Example: '20180824_Syria'
+            region_id = os.path.normpath(scene_folder).split(os.sep)[2]  # Example: '20180824_Syria'
             
             for image_path, xml_path in zip(image_paths, xml_paths):
                 self.samples.append((image_path, xml_path, region_id))

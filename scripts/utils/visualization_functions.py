@@ -966,3 +966,99 @@ def plot_litterlines_patches(images, masks, region_ids):
     plt.savefig('doc/figures/litterlines_patches.png', dpi=600, bbox_inches='tight')
     plt.savefig('doc/figures/litterlines_patches.pdf')
     plt.close()
+    
+def plot_signatures(test_loader, train_loader, val_loader):
+    """Generate line plots comparing R, G, B, and NIR values between the test region and each training/validation region."""
+    def extract_channel_means(image_batch, mask_batch):
+        """ Compute mean values for R, G, B, and NIR channels for masked regions. """
+        mask_batch = mask_batch.unsqueeze(1)  # Add a channel dimension → Shape becomes [140, 1, 256, 256]
+        masked_images = image_batch * mask_batch  # Element-wise multiplication to retain only masked pixels
+        valid_pixels = mask_batch.sum(dim=(2, 3))  # Count valid pixels per channel
+        
+        # Avoid division by zero
+        valid_pixels[valid_pixels == 0] = 1
+        
+        mean_values = masked_images.sum(dim=(2, 3)) / valid_pixels  # Compute mean for each channel
+        return mean_values.mean(dim=0).numpy()  # Average across batch
+    
+    # Extract test data
+    test_images, test_masks, test_region_ids = next(iter(test_loader))
+    test_means = extract_channel_means(test_images, test_masks)
+
+    # Combine train and val loaders
+    combined_loaders = {"Train": train_loader, "Validation": val_loader}
+
+    unique_regions = {}
+
+    for loader_name, loader in combined_loaders.items():
+        for images, masks, region_ids in loader:
+            for i in range(images.shape[0]):  # Loop over batch elements
+                region_id = region_ids[i]
+                
+                if region_id not in unique_regions:
+                    unique_regions[region_id] = {
+                        "means": [],
+                        "name": f"{loader_name} Region {region_id}",
+                        "region": region_id
+                    }
+                
+                means = extract_channel_means(images[i].unsqueeze(0), masks[i].unsqueeze(0))
+                unique_regions[region_id]["means"].append(means)
+
+    # Create subplots
+    num_regions = len(unique_regions)
+    num_plots = num_regions + 1  # Include test region plot
+
+    ncols = (num_plots + 2) // 3  # At least 3 rows
+    nrows = (num_plots + ncols - 1) // ncols
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(0.8 * num_plots, 0.6 * num_plots), sharex=True, sharey=True, constrained_layout=True)
+
+    axes = axes.flatten()
+    for ax in axes[num_plots:]:
+        ax.axis('off')
+
+    x_labels = ["B", "G", "R", "NIR"]
+    x_ticks = np.arange(len(x_labels))
+
+    # Plot test region
+    axes[0].plot(x_ticks, test_means, marker='x', linestyle='-', color="#F2CC8F", label="Validated MLW \n(Kikaki et al., 2020)")
+    
+    # Compute standard deviation for test region (assuming you're using the full batch)
+    test_stds = np.std(test_images.numpy(), axis=(0, 2, 3))  # Calculate std for R, G, B, NIR over batch
+    axes[0].fill_between(x_ticks, test_means - test_stds, test_means + test_stds, color="#F2CC8F", alpha=0.3)
+    
+    axes[0].set_xticks(x_ticks)
+    axes[0].set_xticklabels(x_labels)
+    axes[0].legend(fontsize=8)
+
+    # Plot training/validation regions
+    for idx, (ax, (region_id, data)) in enumerate(zip(axes[1:], unique_regions.items())):
+        region_means = np.mean(np.stack(data["means"]), axis=0)  # Compute mean across all images
+        region_stds = np.std(np.stack(data["means"]), axis=0)  # Compute standard deviation across batch
+        
+        # Plot the means
+        label = f"{data['region'][:4]}-{data['region'][4:6]}-{data['region'][6:8]}, {data['region'][9:]}"
+        ax.plot(x_ticks, region_means, marker='o', linestyle='-', color="#3D405B", label=label)
+        
+        # Plot the standard deviation as shaded area (±1 standard deviation)
+        ax.fill_between(x_ticks, region_means - region_stds, region_means + region_stds, 
+                        color="#3D405B", alpha=0.3)  # Adjust alpha for transparency
+        
+        # Plot test region for comparison
+        ax.plot(x_ticks, test_means, marker='x', linestyle='-', color="#F2CC8F")  # Test data
+        ax.fill_between(x_ticks, test_means - test_stds, test_means + test_stds, color="#F2CC8F", alpha=0.3)
+        
+        ax.set_xticks(x_ticks)
+        ax.set_xticklabels(x_labels)
+        ax.legend(fontsize=8, loc='upper right')
+
+    # Set the Y-axis label for the outer plots (left and bottom axes)
+    for idx, ax in enumerate(axes):
+        if idx % ncols == 0: # Check for leftmost columns
+            ax.set_ylabel('TOA reflectance [-]')#, fontsize=8)
+
+    # Save the plot
+    plt.savefig('doc/figures/litterlines_signatures.png', dpi=600, bbox_inches='tight')
+    plt.savefig('doc/figures/litterlines_signatures.pdf')
+    plt.close()

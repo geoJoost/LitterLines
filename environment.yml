@@ -1,4 +1,4 @@
-name: tracev2
+name: litterlines
 channels:
   - conda-forge
   - defaults
@@ -14,4 +14,4 @@ dependencies:
   - earthengine-api
   - geemap
   - spectral
-  - skimage
+  - scikit-image
