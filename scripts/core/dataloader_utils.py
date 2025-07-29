@@ -182,10 +182,26 @@ def flag_nir_displacement(patch, geom, window_transform, patch_size, pixel_size,
     distances = np.arange(patch_size) * pixel_size
 
     # Iterate over bands
-    for i in range(patch.shape[2]):
+    # --- The 3 lines below were commented out and replaced due to 
+    # for i in range(patch.shape[2]):
+    #     # Extract the band values for the line
+    #     band_values = patch[:, :, i][line_mask]
+
+    for i in range(patch.shape[0]):
         # Extract the band values for the line
-        band_values = patch[:, :, i][line_mask]
-        
+        band_values = patch[i][line_mask]
+
+        # === DEBUG: Print band_values shape BEFORE reshape
+        print(f"[DEBUG flag_nir_displacement] Band {i}: band_values.shape = {band_values.shape}, expected to reshape to (?, {patch_size})")
+        # === END DEBUG
+
+        # Check for correct shape before reshaping
+        if band_values.size % patch_size != 0 or band_values.size == 0:
+            print(f"[DEBUG flag_nir_displacement] Skipping band {i}: band_values.shape = {band_values.shape}, cannot reshape to (?, {patch_size})")
+            values.append(np.full((patch_size,), np.nan))  # Append NaNs to keep array length consistent
+            peaks.append((np.nan, 0, 0))
+            continue
+
         # Reshape into (approximately num_columns, 256) where num_columns is the width and 256 is the length
         # The exact number of rows depends on the raster alignment
         reshaped_values = band_values.reshape(-1, patch_size)  # Ensure correct number of columns

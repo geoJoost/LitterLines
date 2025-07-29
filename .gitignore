@@ -166,3 +166,10 @@ cython_debug/
 #.idea/
 
 /data/
+
+*.pth
+*.png
+/litterlines_env/
+/wandb/
+/weights/
+*.tif
