@@ -11,10 +11,242 @@ from torch.utils.data import Dataset, DataLoader, Subset
 from rasterio.features import rasterize
 import rasterio.windows
 from skimage.restoration import denoise_bilateral
-
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
 # Custom imports
-from core.dataloader_utils import flag_noisy_label, flag_nir_displacement, parse_reflectance_coefficients, split_linestring
+from .dataloader_utils import flag_noisy_label, flag_nir_displacement, parse_reflectance_coefficients, split_linestring
+# CHANGE: It was "from core.dataloader_utils..."
+
+# ===== Albumentations Transform Pipeline for Training =====
+def get_train_augmentation_normal():
+    """Returns Albumentations augmentation pipeline with normal (default) intensity."""
+    return A.Compose([
+        # Orientation transforms
+        A.HorizontalFlip(p=0.3),
+        A.VerticalFlip(p=0.3),
+        A.RandomRotate90(p=0.3),
+        
+        # Geometric transforms: moderate shift/scale/rotate
+        A.Affine(
+            scale=(0.9, 1.1),   # up to 10% zoom in/out
+            translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)},  # up to 5% translation
+            rotate=(-15, 15),   # rotate by ±15 degrees
+            p=0.4
+        ),
+        
+        # Noise & blur: moderate levels
+        A.GaussNoise(
+            std_range=(0.1, 0.2),      # Range as *fraction* of max value (e.g., 0.1–0.2 × 255 for uint8)
+            mean_range=(0.0, 0.0),     # Centered noise, can be changed if needed
+            per_channel=True,          # Per-channel noise
+            noise_scale_factor=1,      # 1 means pixel-wise, <1 means coarser/faster
+            p=0.5
+        ),
+        A.GaussianBlur(blur_limit=(3, 5), p=0.2),            # Blur with 3x3 or 5x5 kernel
+        
+        # Color/Intensity: moderate shifts
+        A.RandomBrightnessContrast(
+            brightness_limit=0.25, contrast_limit=0.2, p=0.5   # brightness ±25%, contrast ±20%
+        ),
+        A.RandomGamma(gamma_limit=(85, 115), p=0.3),           # gamma 0.85–1.15 (±15%)
+        
+        # Occlusion: moderate, creates holes that cover up fractions of the patch
+        A.CoarseDropout(
+            num_holes_range=(1, 4),            # (min, max) number of holes per image
+            hole_height_range=(0.05, 0.2),     # fraction of image height (or int in px)
+            hole_width_range=(0.05, 0.2),      # fraction of image width (or int in px)
+            fill=0,                            # fill value (0 for black, or "random", etc.)
+            fill_mask=None,                    # for mask, None = no mask occlusion
+            p=0.2
+        ),
+
+        ToTensorV2()
+    ])
+
+# === Mild augmentations (gentle) ===
+def get_train_augmentation_low():
+    """Returns Albumentations augmentation pipeline with mild intensity for images & masks."""
+    
+    return A.Compose([
+        # Spatial flips/rotations (same probability as normal, but inherently mild effect)
+        A.HorizontalFlip(p=0.3),
+        A.VerticalFlip(p=0.3),
+        A.RandomRotate90(p=0.3),
+
+        # Mild geometric transforms: small shifts, scales, rotations
+        A.Affine(
+            scale=(0.98, 1.02),                   # zoom in/out (1.0 means no change)
+            translate_percent={"x": (-0.01, 0.01), "y": (-0.01, 0.01)},  # shift ±1%
+            rotate=(-5, 5),                       # rotate ±5 degrees
+            shear=0,                              # no shear
+            p=0.4
+        ),
+        
+        # Mild noise & blur
+        A.GaussNoise(
+            std_range=(0.02, 0.08),   # 2%–8% noise
+            mean_range=(0.0, 0.0),
+            per_channel=True,
+            noise_scale_factor=1,
+            p=0.2,
+        ),
+        A.GaussianBlur(blur_limit=3, p=0.2),                 # minimal blur (3x3 kernel only)
+        
+        # Mild color/intensity shifts
+        A.RandomBrightnessContrast(
+            brightness_limit=0.1, contrast_limit=0.1, p=0.5   # slight brightness/contrast change (±10%)
+        ),
+        A.RandomGamma(gamma_limit=(95, 105), p=0.3),          # minor gamma variation (0.95–1.05)
+        
+        # Occlusion simulation: very mild
+        A.CoarseDropout(
+            num_holes_range=(1, 1),
+            hole_height_range=(0.03, 0.07),
+            hole_width_range=(0.03, 0.07),
+            fill=0,
+            fill_mask=None,
+            p=0.1
+        ),
+
+        # Convert to tensor
+        ToTensorV2()
+    ])
+
+# === Intense augmentations (aggressive) ===
+def get_train_augmentation_high():
+    """Returns Albumentations augmentation pipeline with high (intense) augmentation levels."""
+    return A.Compose([
+        # Orientation flips/rotations (same probabilities)
+        A.HorizontalFlip(p=0.3),
+        A.VerticalFlip(p=0.3),
+        A.RandomRotate90(p=0.3),
+        
+        # Geometric transforms: larger shifts/scales/rotations
+        A.Affine(
+            scale=(0.8, 1.2),
+            translate_percent={"x": (-0.15, 0.15), "y": (-0.15, 0.15)},
+            rotate=(-45, 45),
+            shear=(-10, 10), # Only in high
+            p=0.4,
+        ),
+        
+        # Noise & blur: higher levels
+        A.GaussNoise(
+            std_range=(0.15, 0.3),    # 15%–30% noise
+            mean_range=(-0.05, 0.05),
+            per_channel=True,
+            noise_scale_factor=1,
+            p=0.5,
+        ),
+        A.GaussianBlur(blur_limit=(5, 7), p=0.2),           # blur with 5x5 or 7x7 kernel
+        
+        # Color/Intensity: strong shifts
+        A.RandomBrightnessContrast(
+            brightness_limit=0.4, contrast_limit=0.3, p=0.5   # brightness ±40%, contrast ±30%
+        ),
+        A.RandomGamma(gamma_limit=(70, 130), p=0.3),          # gamma 0.70–1.30 (wider gamma change)
+        
+        # Occlusion: more/larger occlusions, simulating heavy cloud/glint
+        A.CoarseDropout(
+            num_holes_range=(2, 8),
+            hole_height_range=(0.10, 0.30),
+            hole_width_range=(0.10, 0.30),
+            fill=0,
+            fill_mask=None,
+            p=0.4
+        ),
+
+        ToTensorV2()
+    ])
+
+# === Very Intense augmentations (very aggressive) ===
+def get_train_augmentation_very_high():
+    """Albumentations augmentation pipeline with *very high* augmentation levels."""
+    return A.Compose([
+        # Orientation flips/rotations (same probabilities)
+        A.HorizontalFlip(p=0.3),
+        A.VerticalFlip(p=0.3),
+        A.RandomRotate90(p=0.3),
+        
+        # Geometric transforms: extreme shifts/scales/rotations/shears
+        A.Affine(
+            scale=(0.65, 1.35),  # 65% to 135% scaling (very strong zoom in/out)
+            translate_percent={"x": (-0.25, 0.25), "y": (-0.25, 0.25)},  # up to 25% translation
+            rotate=(-90, 90),    # full right/left tilt
+            shear=(-25, 25),     # more skewing
+            p=0.4,
+        ),
+        
+        # Noise & blur: even higher noise/blur
+        A.GaussNoise(
+            std_range=(0.25, 0.5),      # 25%–50% noise
+            mean_range=(-0.08, 0.08),   # broader mean
+            per_channel=True,
+            noise_scale_factor=1,
+            p=0.5,
+        ),
+        A.GaussianBlur(blur_limit=(7, 11), p=0.2),  # bigger blur
+        
+        # Color/Intensity: max perturbations
+        A.RandomBrightnessContrast(
+            brightness_limit=0.6, contrast_limit=0.5, p=0.5   # up to ±60% brightness, ±50% contrast
+        ),
+        A.RandomGamma(gamma_limit=(40, 160), p=0.3),  # gamma 0.4–1.6
+        
+        # Occlusion: max coverage, many & large
+        A.CoarseDropout(
+            num_holes_range=(5, 16),
+            hole_height_range=(0.15, 0.40),
+            hole_width_range=(0.15, 0.40),
+            fill=0,
+            fill_mask=None,
+            p=0.4
+        ),
+
+        ToTensorV2()
+    ])
+
+def print_augmentation_pipeline(augmentation):
+    """
+    Print only the essential, reproducible parameters for each transform in an Albumentations Compose pipeline.
+    """
+    print("\n=== TRAIN AUGMENTATION PIPELINE USED ===")
+    if hasattr(augmentation, 'transforms'):
+        for t in augmentation.transforms:
+            params = {}
+            # Loop through __init__ arguments, if available in __dict__
+            init_keys = t.__init__.__code__.co_varnames[1:t.__init__.__code__.co_argcount]
+            for k in init_keys:
+                if k in t.__dict__:
+                    v = t.__dict__[k]
+                    if isinstance(v, (int, float, str, bool, tuple, list, dict)):
+                        params[k] = v
+            # Always add probability p if present
+            if 'p' in t.__dict__:
+                params['p'] = t.__dict__['p']
+            print(f"  {type(t).__name__}: {params}")
+    else:
+        print("  [No transforms found in pipeline]")
+    print("========================================\n")
+
+def get_val_augmentation():
+    """
+    Only convert to tensor for validation/test (no augmentation).
+    """
+    return A.Compose([
+        ToTensorV2()
+    ])
+
+def to_numpy(x):
+    if isinstance(x, torch.Tensor):
+        return x.cpu().numpy()
+    return x
+
+def to_tensor(x, dtype=torch.float):
+    if isinstance(x, np.ndarray):
+        return torch.from_numpy(x).type(dtype)
+    return x.type(dtype)
 
 class LitterLinesDataset(Dataset):
     def __init__(self, root_dir, transform=None, patch_size=256):
@@ -38,20 +270,18 @@ class LitterLinesDataset(Dataset):
     
     def _load_dataset(self):
         """Precomputes file paths and their corresponding region IDs."""
-        scene_folders = glob.glob(os.path.join(self.root_dir, '*/*/'))#[:4] #TODO: Remove. Kept for debugging
-        #scene_folders = ['data/LitterLines/20171009_Kikaki/103a/', 'data/LitterLines/20171009_Kikaki/103c/', 'data/LitterLines/20171009_Kikaki/0f25/']
-        
+        scene_folders = glob.glob(os.path.join(self.root_dir, '*/*/'))
         for scene_folder in scene_folders:
-            # Get image paths and metadata XMLs
             image_paths = glob.glob(os.path.join(scene_folder, "*AnalyticMS*.tif"))
             xml_paths = glob.glob(os.path.join(scene_folder, "*metadata*.xml"))
-
             if not image_paths or not xml_paths:
                 continue  # Skip if no valid images or metadata
 
-            # Extract region ID from path
-            region_id = os.path.normpath(scene_folder).split(os.sep)[2]  # Example: '20180824_Syria'
-            
+            # Extract region ID from folder name
+            import re
+            parent_of_parent = os.path.basename(os.path.dirname(os.path.dirname(scene_folder)))
+            match = re.search(r'\d{8}_(\w+)', parent_of_parent)
+            region_id = match.group(1).upper() if match else parent_of_parent.upper()
             for image_path, xml_path in zip(image_paths, xml_paths):
                 self.samples.append((image_path, xml_path, region_id))
 
@@ -59,43 +289,42 @@ class LitterLinesDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        """ Returns all patches and masks for a given scene, with caching"""
+        """Returns all patches and masks for a given scene, with caching and quality checks."""
         image_path, xml_path, region_id = self.samples[idx]
         scene_name = os.path.basename(image_path).split("_3B")[0] # Extract scene-name
-        
-        # Define cache filename
+
+        # Define cache filename. 
+        # WARNING: If you change quality checks (e.g. NIR filter, noisy labels), 
+        # you must clear this cache so new filtering takes effect!
         cache_dir = os.path.join("data", "cache")
         os.makedirs(cache_dir, exist_ok=True)
         cache_file_patches = os.path.join(cache_dir, f"{region_id}_{scene_name}_patches.pt")
         cache_file_masks = os.path.join(cache_dir, f"{region_id}_{scene_name}_masks.pt")
-        
+
         if os.path.exists(cache_file_patches):
             print(f"[INFO] LitterLines is pre-processed. Retrieving dataset from cache.")
             patches = torch.load(cache_file_patches)
             masks = torch.load(cache_file_masks)
         else:
-            # Get reflectance coefficients for TOAR to TOA
+            # Parse reflectance coefficients for conversion
             reflectance_coefficients = parse_reflectance_coefficients(xml_path)
-            
-            # Find associated MLW-annotations
+
+            # Filter annotations to current scene
             scene_annotations = self.litter_data[self.litter_data['ps_product'] == scene_name]
             if scene_annotations.empty:
                 print(f"[INFO] Skipping {region_id} with ID {scene_name}. No annotations found")
-                return torch.empty(0), torch.empty(0), None # Return empty tensors and None for region_id for filtering the data
-            print(f"[INFO] Processing {region_id} with ID: {scene_name}")
-                
-            # Generate patches and masks
-            patches, masks = self._create_patches_and_masks(image_path, scene_annotations, reflectance_coefficients)
-            
-            # TODO: Remove at some point. Kept for debugging
-            #total_true_pixels = sum(arr.sum() for arr in masks)
-            #total_pixels = sum(arr.size for arr in masks)
-            #print(f"[INFO] {region_id} with ID {scene_name} has {total_true_pixels} pixels of MLWs, out of {total_pixels}")
+                return torch.empty(0), torch.empty(0), None # Return empty tensors and None for region_id
 
-            # Convert to tensor
+            print(f"[INFO] Processing {region_id} with ID: {scene_name}")
+
+            # Main patch and mask creation (calls all filtering functions)
+            patches, masks = self._create_patches_and_masks(
+                image_path, scene_annotations, reflectance_coefficients
+            )
+
+            # Save filtered, final patches to cache (guarantees only "good" data is reused)
             patches = torch.tensor(np.array(patches), dtype=torch.float32) # (N, C, 256, 256)
-            masks = torch.tensor(np.array(masks), dtype=torch.int8) # (N, 1, 256, 256)
-            
+            masks = torch.tensor(np.array(masks), dtype=torch.int8)        # (N, 1, 256, 256)
             torch.save(patches, cache_file_patches)
             torch.save(masks, cache_file_masks)
 
@@ -104,141 +333,65 @@ class LitterLinesDataset(Dataset):
             print(f"[INFO] Applying transform to images.")
             patches = torch.stack([self.transform(patch) for patch in patches])
             masks = torch.stack([self.transform(mask) for mask in masks])
-        
+
         return patches, masks, region_id
 
     def _create_patches_and_masks(self, image_path, annotations, reflectance_coefficients):
         """
-        Create 256x256px patches around annotations and corresponding masks.
+        Create 256x256px patches around annotations and corresponding masks,
+        while performing all quality checks (e.g. noisy label, NIR displacement).
         """
         patch_size = self.patch_size
         patches = []
         masks = []
 
-        # Open the image file to get metadata
         with rasterio.open(image_path) as src:
             transform = src.transform
             crs = src.crs
+            window_size = patch_size * transform[0]
+            annotations = annotations.to_crs(crs)
 
-            # Window size in geographic coordinates
-            window_size = patch_size * transform[0]  # Transform[0] gets pixel size in meters
-            annotations = annotations.to_crs(crs) # EPSG:4326 into local CRS
-
-            # To prevent loss of annotations, split linestrings into smaller segments when necessary
+            # Split long linestrings for robust patching
             annotations['temp_geometry'] = annotations['geometry'].apply(
                 lambda geom: split_linestring(geom, max_length=window_size)
             )
             annotations = annotations.explode('temp_geometry', ignore_index=True)
             annotations['geometry'] = annotations['temp_geometry']
-
             assert annotations['geometry'].length.max() <= window_size, "Found segments exceeding window size"
 
-            # Iterate through each linestring in the annotations
             for _, row in annotations.iterrows():
                 geom = row['geometry']
-                #print(f"Linestring length: {geom.length:.2f}")
                 if not geom.is_valid:
                     print(f"Linestring in PS-scene '{row['ps_product']}' with ID #{row.name} is invalid")
                     continue
 
-                # For each linestring, get the centroid to create a window (=patch)
+                # Center window on linestring centroid
                 x, y = geom.centroid.x, geom.centroid.y
                 window = rasterio.windows.from_bounds(
                     x - window_size / 2, y - window_size / 2,
                     x + window_size / 2, y + window_size / 2,
                     transform
                 )
-                    
-                # Read the image data within the window
                 patch = src.read(window=window).astype(np.float32)
-                
-                # Ensure the patch is of the correct size
                 if patch.shape[1] != patch_size or patch.shape[2] != patch_size:
                     continue
-               
-                # Convert TOAR to TOA reflectance in-place
+
+                # Convert to reflectance in-place
                 for band_idx in range(patch.shape[0]):
                     coefficient = reflectance_coefficients.get(band_idx + 1)
                     patch[band_idx] *= coefficient
-                              
-                def quick_viz(patch):
-                    import matplotlib.pyplot as plt
-                    import numpy as np
 
-                    # Reorganizing channels from BGR to RGB
-                    bgr = patch[:3]
-                    rgb = bgr[::-1]
-
-                    # Normalize RGB for visualization using 2%-98% percentiles
-                    vmin_rgb, vmax_rgb = np.percentile(rgb, [1, 99])
-                    rgb_normalized = np.clip((rgb.transpose(1, 2, 0) - vmin_rgb) / (vmax_rgb - vmin_rgb), 0, 1)
-
-                    # Prepare individual channels for visualization
-                    channels = ['Blue', 'Green', 'Red', 'NIR']
-                    colors = ['blue', 'green', 'red', 'purple'] 
-                    patch_normalized = []
-                    for i in range(4):
-                        vmin, vmax = np.percentile(patch[i], [1, 99])
-                        patch_normalized.append(np.clip((patch[i] - vmin) / (vmax - vmin), 0, 1))
-
-                    # Create a figure with 3 rows and 2 columns
-                    fig, axes = plt.subplots(3, 2, figsize=(6, 10))
-
-                    # Plot 1: RGB visualization
-                    axes[0, 0].imshow(rgb_normalized)
-                    axes[0, 0].axis('off')
-                    axes[0, 0].set_title("True-colour (1%-99%)", fontsize=11)
-
-                    # Plot 2: Histogram
-                    for i, channel in enumerate(channels):
-                        axes[0, 1].hist(
-                            patch[i].flatten(), bins=256,# range=(0, 1),
-                            color=colors[i], alpha=0.6, label=channel
-                        )
-                    axes[0, 1].set_title("Histogram of TOA reflectance")
-                    #axes[0, 1].set_xlabel("Reflectance")
-                    #axes[0, 1].set_ylabel("Frequency")
-
-                    axes[0, 1].legend(loc='upper right')
-                    axes[0, 1].grid(axis='y', alpha=0.75)
-
-                    # Plot individual channels with cross gridlines
-                    for i in range(4):
-                        ax = axes[1 + i // 2, i % 2]  # Map to the second and third rows
-                        ax.imshow(patch_normalized[i])#, cmap=colors[i])
-                        ax.axhline(patch.shape[1] // 2, color='white', linestyle='--', alpha=0.7)  # Horizontal cross
-                        ax.axvline(patch.shape[2] // 2, color='white', linestyle='--', alpha=0.7)  # Vertical cross
-                        ax.set_title(f"{channels[i]}", fontsize=11)
-                        ax.axis('off')
-
-                    # Adjust layout and save the figure
-                    plt.tight_layout()
-                    plt.savefig(f"doc/debug/rgb_patch.png", bbox_inches='tight')
-                    plt.close()
-                    #print('Plotted figure')
-                #quick_viz(patch)
-
-                # Construct Shapely window for retrieving all annotations within the newly created patch
+                # Construct patch label
                 from shapely.geometry import box
                 window_bounds = (
                     x - window_size / 2, y - window_size / 2,
                     x + window_size / 2, y + window_size / 2
                 )
-
-                # Clip the annotations to image patch
                 annotations_clip = gpd.clip(annotations, box(*window_bounds))
-
-                # In the annotations, we have three labels:
-                ## 0: Not used, background
-                ## 1: Debris targets / suspected plastics
-                ## 2: Organic debris / mucilage
-                ## 3: Misc targets, such as wakes, clouds, and sensor noise
-                # We use the third type for hard negative mining, therefore, no positive values should be generated in the final mask
                 if int(row['type']) == 3:
                     mask = np.zeros((patch_size, patch_size), dtype=np.uint8)
                 else:
-                    # For all other types, rasterize the annotations and create binary masks
-                    window_transform = src.window_transform(window) # Derive the transform for the current window
+                    window_transform = src.window_transform(window)
                     line_raster = rasterize(
                         [(geom, 1) for geom in annotations_clip['geometry']],
                         out_shape=(patch_size, patch_size),
@@ -247,145 +400,104 @@ class LitterLinesDataset(Dataset):
                         all_touched=True,
                         dtype=np.uint8
                     )
-
-                    # Generate the corresponding mask
                     mask = self._generate_mask(patch, line_raster).astype(np.int8)
-                
-                # Re-order from CHW to HWC for self.transform()
-                #patch = patch.transpose(1, 2, 0)
 
-                # Flag 1: Check whether positive labels exceed >20% of all pixels in the label
-                # If this is the case, it is likely that the Otsu threshold has failed for this label 
-                # And therefore, it generated noisy and unusable segmentation mask / label               
+                # ===== Quality Check 1: Noisy Label Filter =====
                 if flag_noisy_label(mask, threshold_percentage=20):
-                    print(f"Generated label in PS-scene '{row['ps_product']}' with ID #{row.name} is invalid.")
+                    print(f"Generated label in PS-scene '{row['ps_product']}' with ID #{row.name} is invalid (noisy label >20%).")
                     continue
 
-                # Flag 2: Check for NIR displacement in the dataset.
-                # The NIR band is considered displaced if its peak TOA reflectance is more than 20 pixels away from the RGB peaks.
-                #if flag_nir_displacement(patch, geom, window_transform, patch_size, pixel_size=src.res[0], threshold=20):
-                    print(f"Spectral misalignment detected: The NIR band in the PS-scene '{row['ps_product']}' with ID #{row.name} is displaced beyond the acceptable threshold.")
+                # ===== Quality Check 2: NIR Displacement Filter =====
+                # The NIR band is considered displaced if its peak reflectance is >20 pixels away from RGB peaks.
+                print(f"[DEBUG _create_patches_and_masks] patch.shape = {patch.shape}, patch_size = {patch_size}") # DEBUG
+
+                if flag_nir_displacement(patch, geom, window_transform, patch_size, pixel_size=src.res[0], threshold=20):
+                    print(f"Spectral misalignment detected: NIR band in PS-scene '{row['ps_product']}' with ID #{row.name} is displaced beyond threshold. Skipping patch.")
                     continue
 
+                # If patch passes all quality checks, add it
+                print(f"PATCH DEBUG: patch.shape = {patch.shape} for {image_path}") # DEBUG
                 patches.append(patch)
                 masks.append(mask)
 
-        #print(f"Shape of patches: {len(patches)}")
-        #print(f"Shape of masks: {len(masks)}")
         return patches, masks
 
     def _generate_mask(self, patch, mask, buffersize_water=3, water_seed_probability=0.90, object_seed_probability=0.2, rw_beta=10):
-
         """
         Refines a coarse label mask given a patch using Otsu thresholding on VNIR data and Random Walker.
+        (No structural changes here, left as is.)
         """
         from skimage.filters import threshold_otsu
         from skimage.morphology import disk, dilation
         from skimage.segmentation import random_walker
         import numpy as np
-                
-        # Slight improvements in thresholded results, but slows down processing significantly
-        # for band_idx in range(patch.shape[0]):
-        #    valid_mask = patch[band_idx] > 0  # Identify valid (non-zero) pixels
-        #    filtered_band = denoise_bilateral(patch[band_idx], sigma_color=None, sigma_spatial=5)
-        #    patch[band_idx][valid_mask] = filtered_band[valid_mask]  # Apply only to valid pixels
 
-        # Extract VNIR bands
         blue, green, red, nir = patch
-
-        # Best performance was found utilizing using the Rotation-Absorption Index
-        # We also invert the NDI so debris objects are bright in the resulting image
-        with np.errstate(divide='ignore', invalid='ignore'): # Ignore NoData (=0.0) values outside the scene      
-            single_channel = (blue - nir) / (blue + nir) *-1
-           
-        # Remove NoData values (np.nan) for values outside the scene
-        valid_pixels = single_channel[~np.isnan(single_channel)]  # Extract only valid pixels
-        
-        # Otsu threshold
-        thresh = threshold_otsu(valid_pixels)  # Otsu threshold
-        q95 = np.percentile(valid_pixels, 95) # IQR95 threshold
+        with np.errstate(divide='ignore', invalid='ignore'):
+            single_channel = (blue - nir) / (blue + nir) * -1
+        valid_pixels = single_channel[~np.isnan(single_channel)]
+        thresh = threshold_otsu(valid_pixels)
+        q95 = np.percentile(valid_pixels, 95)
         otsu_segments = single_channel > q95
-        
-        # Create the water mask
-        mask_water = dilation(mask, footprint=disk(buffersize_water)) == 0
 
-        # Generate water seeds
-        out_shape = patch.shape[1:] # (256, 256)
+        mask_water = dilation(mask, footprint=disk(buffersize_water)) == 0
+        out_shape = patch.shape[1:]
         random_seeds = np.random.rand(*out_shape) > water_seed_probability
         seeds_water = random_seeds * mask_water
-        
-        # Mask lines
         mask_lines = (~mask_water)
-
-        # Generate seeds for random walker
         if (otsu_segments * mask_lines).sum() > 0:
             seeds_lines = otsu_segments * mask_lines * (np.random.rand(*out_shape) > object_seed_probability)
         else:
             seeds_lines = mask_lines * (np.random.rand(*out_shape) > object_seed_probability)
-
-        # Apply random walker segmentation if seeds are present
         if seeds_lines.sum() > 0:
             markers = seeds_lines * 1 + seeds_water * 2
             labels = random_walker(patch, markers, beta=rw_beta, mode='bf', return_full_prob=False, channel_axis=0) == 1
-            #print("Refined the labels")
         else:
             print("Could not refine sample, returning original mask")
             labels = mask
-            #markers = None
-
-        # Visualization
-        def quick_viz(single_channel, valid_pixels_rescaled, otsu_thresh, q95, otsu_segments, final_mask, seeds_lines, seeds_water, mask):
-            """
-            Visualizes NDWI single channel, histogram with Otsu threshold, 
-            Otsu segments, final mask, seed points, and overlay the original mask.
-            Adjusts for potential y-axis flipping between coordinates and image.
-            """
-            fig, axes = plt.subplots(2, 2, figsize=(12, 12))
-
-            # Plot single channel visualization
-            axes[0, 0].imshow(single_channel, cmap="gray")
-            axes[0, 0].set_title("Inverse Rotation-Absorption Index")
-            axes[0, 0].axis("off")
-
-            # Plot histogram with Otsu threshold
-            axes[0, 1].hist(valid_pixels_rescaled, bins=256, color='gray', alpha=0.7)
-            axes[0, 1].axvline(otsu_thresh, color='red', linestyle='--', label=f'Otsu Threshold: {otsu_thresh:.2f}')
-            axes[0, 1].axvline(q95, color='blue', linestyle='--', label=f'IQR95 Threshold: {q95:.2f}')
-
-
-            axes[0, 1].set_title("Histogram with thresholds")
-            axes[0, 1].set_xlabel("Inverse RAI")
-            axes[0, 1].set_ylabel("Frequency")
-            axes[0, 1].legend()
-
-            # Plot Otsu segments
-            axes[1, 0].imshow(otsu_segments, cmap="gray")
-            axes[1, 0].set_title("Segments")
-            axes[1, 0].axis("off")
-
-            # Overlay the seed points (seeds_lines and seeds_water) on Otsu segments
-            # Flip the y-coordinates for correct alignment with imshow
-            axes[1, 0].scatter(*np.flip(np.where(seeds_lines), axis=0), color='red', label='Object Seeds', s=5, marker='o', alpha=0.7)
-            axes[1, 0].scatter(*np.flip(np.where(seeds_water), axis=0), color='blue', label='Water Seeds', s=5, marker='x', alpha=0.7)
-
-            # Overlay the original mask (only positive values = 1) on Otsu segments in orange
-            positive_mask_coords = np.where(mask == 1)
-            axes[1, 0].scatter(*np.flip(positive_mask_coords, axis=0), color='orange', label='Line annotations', s=5, marker='o', alpha=0.7)
-            axes[1, 0].legend(loc='upper right')
-
-            # Plot final mask
-            axes[1, 1].imshow(final_mask, cmap="gray")
-            axes[1, 1].scatter(*np.flip(positive_mask_coords, axis=0), color='orange', label='Line annotations', s=5, marker='o', alpha=0.7)
-            axes[1, 1].set_title("Final label")
-            axes[1, 1].axis("off")
-
-            # Adjust layout and save
-            plt.tight_layout()
-            plt.savefig(f"doc/debug/otsu_mask.png")
-            plt.close()
-        #quick_viz(single_channel, valid_pixels, thresh, q95, otsu_segments, labels, seeds_lines, seeds_water, mask)
-
         return labels
+    
+### NEW CLASS bc of error with the patches in the test_loader.py ###
+class LitterLinesPatchDataset(Dataset):
+    def __init__(self, litterlines_path, transform=None):
+        self.transform = transform
+        self.patch_mask_regionid_triples = []  # list of (patch, mask, region_id)
+        
+        # Load all regions (scenes)
+        dataset = LitterLinesDataset(litterlines_path, transform=None)
+        for idx in range(len(dataset)):
+            patches, masks, region_id = dataset[idx]
+            if patches.nelement() == 0:
+                continue  # skip empty
+            for i in range(patches.shape[0]):
+                patch = patches[i].numpy()        # (4, 256, 256) - convert to numpy for Albumentations
+                mask = masks[i].numpy()           # (1, 256, 256)
+                # Squeeze channel dim if mask has (1, H, W)
+                if mask.shape[0] == 1:
+                    mask = mask[0]
+                # Apply augmentation if provided
+                if self.transform:
+                    # Albumentations expects channels first for mask, and channels_last for image!
+                    # So transpose patch to (H, W, C) for augmentations, then transpose back
+                    patch = np.transpose(patch, (1, 2, 0))  # (H, W, C)
+                    augmented = self.transform(image=patch, mask=mask)
+                    patch = np.transpose(augmented['image'], (2, 0, 1))  # Back to (C, H, W)
+                    mask = augmented['mask']
+                    # Ensure mask has shape (1, H, W)
+                    mask = np.expand_dims(mask, axis=0)
+                patch = to_tensor(patch, dtype=torch.float)
+                mask = to_tensor(mask, dtype=torch.float)
+                self.patch_mask_regionid_triples.append((patch, mask, region_id))
+
+        print(f"[INFO] Loaded {len(self.patch_mask_regionid_triples)} patches in total.")
+    
+    def __len__(self):
+        return len(self.patch_mask_regionid_triples)
+    
+    def __getitem__(self, idx):
+        patch, mask, region_id = self.patch_mask_regionid_triples[idx]
+        return patch, mask, region_id
+### END OF NEW CLASS ######################
 
 class DatasetManager:
     """
